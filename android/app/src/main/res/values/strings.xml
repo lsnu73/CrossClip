@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">CrossClip</string>
+    <string name="title_permissions">权限与无感配置</string>
+    <string name="btn_clipboard_perm">1. 开启系统剪贴板读取 (始终允许)</string>
+    <string name="btn_battery_perm">2. 开启后台自启动 / 忽略电池优化</string>
+    <string name="title_config">配对与同步设置</string>
+    <string name="label_room_key">配对密钥 (需与电脑一致):</string>
+    <string name="label_auto_sync">开启双向自动互传</string>
+    <string name="btn_save_config">保存配置并重启服务</string>
+    <string name="btn_test_send">手动发送当前剪贴板到电脑</string>
+    <string name="tile_label">发送剪贴板</string>
+    <string name="process_text_label">发送至电脑</string>
+</resources>

@@ -1,0 +1,13 @@
+* text=auto
+
+# Windows batch scripts keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Unix shell script keeps LF
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Binary assets
+*.jar binary
+*.png binary

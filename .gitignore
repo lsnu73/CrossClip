@@ -1,0 +1,25 @@
+# Rust desktop client
+rust_desktop/target/
+
+# Android project
+android/.gradle/
+android/.idea/
+android/.kotlin/
+android/**/build/
+android/local.properties
+*.iml
+
+# Release binaries (built locally, not committed)
+*.exe
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Runtime data / private local config (never commit)
+config.json
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
