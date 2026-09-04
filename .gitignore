@@ -9,12 +9,14 @@ android/**/build/
 android/local.properties
 *.iml
 
-# Release binaries (built locally, not committed)
+# Release binaries (except the two tracked below)
 *.exe
 *.apk
 *.aab
 *.keystore
 *.jks
+!CrossClip.exe
+!CrossClip.apk
 
 # Runtime data / private local config (never commit)
 config.json
