@@ -98,6 +98,7 @@ struct StatusResponse {
     status: String,
     auth: Option<bool>,
     device_name: Option<String>,
+    device_id: Option<String>,
     message: Option<String>,
 }
 
@@ -110,6 +111,10 @@ pub struct Broadcaster {
 }
 
 impl Broadcaster {
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
     pub fn new(pin_code: Arc<RwLock<String>>, device_id: String) -> Self {
         let broadcaster = Self {
             clients: Arc::new(Mutex::new(Vec::new())),
@@ -334,6 +339,7 @@ fn handle_client_request(
             status: "ok".to_string(),
             auth: None,
             device_name: Some(device_name),
+            device_id: Some(broadcaster.device_id().to_string()),
             message: None,
         })
         .unwrap();
@@ -490,6 +496,7 @@ fn handle_client_request(
                     status: "ok".to_string(),
                     auth: Some(true),
                     device_name: Some(device_name),
+                    device_id: Some(broadcaster.device_id().to_string()),
                     message: None,
                 })
                 .unwrap();

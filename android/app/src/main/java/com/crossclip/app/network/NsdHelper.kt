@@ -8,7 +8,7 @@ import java.net.InetAddress
 
 class NsdHelper(
     private val context: Context,
-    private val onDeviceFound: (deviceName: String, hostIp: String, port: Int) -> Unit,
+    private val onDeviceFound: (deviceId: String, deviceName: String, hostIp: String, port: Int) -> Unit,
     private val onDeviceLost: (deviceName: String) -> Unit
 ) {
     private val TAG = "CrossClipNsd"
@@ -78,10 +78,32 @@ class NsdHelper(
                     val port = resolvedInfo.port
                     val ip = host.hostAddress ?: ""
                     val deviceName = resolvedInfo.serviceName
+                    val attributes = resolvedInfo.attributes
+                    val deviceIdAttr = if (attributes != null && attributes.containsKey("device_id")) {
+                        String(attributes["device_id"] ?: byteArrayOf(), Charsets.UTF_8)
+                    } else {
+                        ""
+                    }
+                    val deviceId = if (deviceIdAttr.isNotEmpty()) deviceIdAttr else "pc_${ip.replace('.', '_')}"
 
                     if (ip.isNotEmpty() && !ip.startsWith("127.")) {
-                        Log.i(TAG, "成功解析到局域网 CrossClip 电脑: $deviceName -> $ip:$port")
-                        onDeviceFound(deviceName, ip, port)
+                        // 异步极速 HTTP 探活 (800ms 超时)，彻底拦截 Android 系统的 mDNS 离线幽灵缓存
+                        Thread {
+                            try {
+                                val url = java.net.URL("http://$ip:$port/ping")
+                                val conn = url.openConnection() as java.net.HttpURLConnection
+                                conn.connectTimeout = 800
+                                conn.readTimeout = 800
+                                conn.requestMethod = "GET"
+                                if (conn.responseCode == 200) {
+                                    Log.i(TAG, "mDNS 设备物理在线确认: $deviceName ($deviceId) -> $ip:$port")
+                                    onDeviceFound(deviceId, deviceName, ip, port)
+                                }
+                                conn.disconnect()
+                            } catch (_: Exception) {
+                                Log.d(TAG, "mDNS 解析出的设备已物理离线，丢弃系统幽灵缓存: $ip:$port")
+                            }
+                        }.start()
                     }
                 }
             })

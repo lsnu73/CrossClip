@@ -34,6 +34,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvAppTitle: TextView
     private lateinit var tvVersionBadge: TextView
     private lateinit var tvDiscoveredDevice: TextView
+    private lateinit var btnSwitchDevice: TextView
+    private lateinit var llDeviceHeader: View
     private lateinit var btnRefreshScan: TextView
     private lateinit var etPinCode: EditText
     private lateinit var btnConnectPc: Button
@@ -129,6 +131,8 @@ class MainActivity : AppCompatActivity() {
         tvVersionBadge.text = "v${BuildConfig.VERSION_NAME}"
         tvStatus = findViewById(R.id.tv_status)
         tvDiscoveredDevice = findViewById(R.id.tv_discovered_device)
+        btnSwitchDevice = findViewById(R.id.btn_switch_device)
+        llDeviceHeader = findViewById(R.id.ll_device_header)
         btnRefreshScan = findViewById(R.id.btn_refresh_scan)
         etPinCode = findViewById(R.id.et_pin_code)
         btnConnectPc = findViewById(R.id.btn_connect_pc)
@@ -136,6 +140,12 @@ class MainActivity : AppCompatActivity() {
         llManualIpContainer = findViewById(R.id.ll_manual_ip_container)
         etManualIp = findViewById(R.id.et_manual_ip)
         btnApplyManualIp = findViewById(R.id.btn_apply_manual_ip)
+
+        val onDeviceSelectClick = View.OnClickListener {
+            showDeviceSelectionDialog()
+        }
+        btnSwitchDevice.setOnClickListener(onDeviceSelectClick)
+        llDeviceHeader.setOnClickListener(onDeviceSelectClick)
 
         switchAutoSync = findViewById(R.id.switch_auto_sync)
         btnLockTaskGuide = findViewById(R.id.btn_lock_task_guide)
@@ -222,7 +232,12 @@ class MainActivity : AppCompatActivity() {
 
         btnRefreshScan.setOnClickListener {
             Toast.makeText(this, "正在重新搜索局域网电脑...", Toast.LENGTH_SHORT).show()
-            startSyncService()
+            val service = SyncForegroundService.instance
+            if (service != null) {
+                service.triggerRescan()
+            } else {
+                startSyncService()
+            }
         }
 
         tvToggleManualIp.setOnClickListener {
@@ -437,6 +452,65 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showDeviceSelectionDialog() {
+        val service = SyncForegroundService.instance
+        if (service == null) {
+            Toast.makeText(this, "后台服务未就绪，请稍候...", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val devices = service.getDiscoveredDeviceList()
+        if (devices.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("未发现在线电脑")
+                .setMessage("当前局域网未探测到任何在线电脑。\n\n请确认：\n1. 手机与电脑已连入同一局域网/Wi-Fi\n2. 电脑端 CrossClip.exe 是否已在运行\n3. 若电脑刚重启或切换了网络，可点击重新扫描")
+                .setPositiveButton("重新扫描") { _, _ ->
+                    service.triggerRescan()
+                    Toast.makeText(this, "正在重新搜索局域网电脑...", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("取消", null)
+                .setNeutralButton("清除历史配置") { _, _ ->
+                    service.clearSavedHistory()
+                    etPinCode.setText("")
+                    etManualIp.setText("")
+                    Toast.makeText(this, "已清除历史电脑与配对记录", Toast.LENGTH_SHORT).show()
+                }
+                .show()
+            return
+        }
+
+        val items = devices.map { dev ->
+            val isCurrent = (service.connectionState == 1 && dev.ip == service.currentPcIp)
+            val tag = if (isCurrent) " [当前连接]" else ""
+            "${dev.name} (${dev.ip})$tag"
+        }.toTypedArray()
+
+        var selectedIndex = devices.indexOfFirst { service.connectionState == 1 && it.ip == service.currentPcIp }
+        if (selectedIndex < 0) {
+            selectedIndex = devices.indexOfFirst { it.deviceId == service.currentTargetDeviceId || it.ip == service.currentPcIp }
+        }
+        if (selectedIndex < 0) selectedIndex = 0
+
+        AlertDialog.Builder(this)
+            .setTitle("选择连接的电脑 (${devices.size} 台在线)")
+            .setSingleChoiceItems(items, selectedIndex) { dialog, which ->
+                val chosen = devices[which]
+                service.selectTargetDevice(chosen)
+                val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+                val devPin = sp.getString("pin_code_${chosen.deviceId}", "") ?: ""
+                etPinCode.setText(devPin)
+                etPinCode.isEnabled = true
+                btnConnectPc.text = "一键连接"
+                Toast.makeText(this, "已切换目标电脑: ${chosen.name} (${chosen.ip})", Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .setNeutralButton("重新扫描") { _, _ ->
+                service.triggerRescan()
+                Toast.makeText(this, "正在重新搜索局域网电脑...", Toast.LENGTH_SHORT).show()
+            }
+            .show()
+    }
+
     private fun startStatusPolling() {
         handler.post(object : Runnable {
             override fun run() {
@@ -449,12 +523,45 @@ class MainActivity : AppCompatActivity() {
                         "Windows 电脑"
                     }
 
-                    if (service.currentPcIp.isNotEmpty()) {
-                        tvDiscoveredDevice.text = "🟢 局域网已发现: $pcName (${service.currentPcIp})"
+                    val deviceList = service.getDiscoveredDeviceList()
+                    val devCount = deviceList.size
+
+                    // 优先从实时探测列表中提取当前目标电脑，杜绝展示未连通的旧死 IP
+                    val liveTarget = deviceList.firstOrNull { it.deviceId == service.currentTargetDeviceId }
+                        ?: deviceList.firstOrNull { service.currentPcIp.isNotEmpty() && it.ip == service.currentPcIp }
+                    val activeIp = if (service.connectionState == 1) {
+                        service.currentPcIp
+                    } else {
+                        liveTarget?.ip ?: ""
+                    }
+                    val activeName = if (service.connectionState == 1) {
+                        pcName
+                    } else {
+                        liveTarget?.name ?: pcName
+                    }
+
+                    if (activeIp.isNotEmpty() && (service.connectionState == 1 || liveTarget != null)) {
+                        if (devCount > 1) {
+                            tvDiscoveredDevice.text = "🟢 局域网已发现 ($devCount 台): $activeName ($activeIp)"
+                            btnSwitchDevice.visibility = View.VISIBLE
+                            btnSwitchDevice.text = "切换 ($devCount)"
+                        } else {
+                            tvDiscoveredDevice.text = "🟢 局域网已发现: $activeName ($activeIp)"
+                            btnSwitchDevice.visibility = View.VISIBLE
+                            btnSwitchDevice.text = "选择"
+                        }
                         tvDiscoveredDevice.setTextColor(Color.parseColor("#10B981"))
                     } else {
-                        tvDiscoveredDevice.text = "🔍 正在局域网全网段搜索电脑..."
-                        tvDiscoveredDevice.setTextColor(Color.parseColor("#64748B"))
+                        if (devCount > 0) {
+                            tvDiscoveredDevice.text = "🟢 局域网发现其他电脑 ($devCount 台)"
+                            tvDiscoveredDevice.setTextColor(Color.parseColor("#10B981"))
+                            btnSwitchDevice.visibility = View.VISIBLE
+                            btnSwitchDevice.text = "选择 ($devCount)"
+                        } else {
+                            tvDiscoveredDevice.text = "🔍 正在局域网全网段搜索电脑..."
+                            tvDiscoveredDevice.setTextColor(Color.parseColor("#64748B"))
+                            btnSwitchDevice.visibility = View.GONE
+                        }
                     }
 
                     when (service.connectionState) {
@@ -482,11 +589,11 @@ class MainActivity : AppCompatActivity() {
                             btnConnectPc.text = "一键连接"
                             btnConnectPc.isEnabled = true
                             etPinCode.isEnabled = true
-                            if (service.currentPcIp.isNotEmpty()) {
+                            if (liveTarget != null) {
                                 tvStatus.text = "● 已发现目标电脑，请输入 6 位 PIN 码连接"
                                 tvStatus.setTextColor(Color.parseColor("#0284C7"))
                             } else {
-                                tvStatus.text = "● 局域网搜索中..."
+                                tvStatus.text = "● 电脑离线中，局域网搜索中..."
                                 tvStatus.setTextColor(Color.parseColor("#64748B"))
                             }
                         }

@@ -27,7 +27,7 @@ object HttpUploader {
 
     /**
      * 验证 PIN 码与电脑连通性并注册手机端对等接收端口
-     * @return success: 是否成功, statusCode: HTTP状态码 (200成功, 403密码错误, -1网络不可达), deviceName: 电脑名称
+     * @return success: 是否成功, statusCode: HTTP状态码 (200成功, 403密码错误, -1网络不可达), deviceName: 电脑名称, deviceId: 电脑设备指纹
      */
     fun verifyPin(
         pcIp: String,
@@ -36,7 +36,7 @@ object HttpUploader {
         deviceId: String = "",
         deviceName: String = "",
         clientPort: Int = 18237,
-        onResult: (success: Boolean, statusCode: Int, deviceName: String?) -> Unit
+        onResult: (success: Boolean, statusCode: Int, deviceName: String?, deviceId: String?) -> Unit
     ) {
         val url = "http://$pcIp:$httpPort/auth"
         DebugLogger.log("HTTP", "发起 PIN 码密文挑战握手: $url (对等接收端口: $clientPort)")
@@ -65,7 +65,7 @@ object HttpUploader {
             override fun onFailure(call: Call, e: IOException) {
                 Log.d(TAG, "连接电脑失败 ($url): ${e.message}")
                 DebugLogger.log("HTTP", "连接电脑失败 ($url): ${e.javaClass.simpleName}: ${e.message}")
-                onResult(false, -1, null)
+                onResult(false, -1, null, null)
             }
 
             override fun onResponse(call: Call, response: Response) {
@@ -76,17 +76,18 @@ object HttpUploader {
                         try {
                             val respJson = JSONObject(body)
                             val devName = respJson.optString("device_name", "Windows 电脑")
-                            DebugLogger.log("HTTP", "PIN 码验证成功，电脑名称: $devName")
-                            onResult(true, 200, devName)
+                            val retDevId = respJson.optString("device_id", "")
+                            DebugLogger.log("HTTP", "PIN 码验证成功，电脑名称: $devName, 设备ID: $retDevId")
+                            onResult(true, 200, devName, retDevId)
                         } catch (e: Exception) {
-                            onResult(true, 200, "Windows 电脑")
+                            onResult(true, 200, "Windows 电脑", null)
                         }
                     } else if (response.code == 403) {
                         Log.w(TAG, "PIN 码不匹配，电脑端拒绝配对")
                         DebugLogger.log("HTTP", "PIN 码不匹配，电脑端拒绝配对 (403)")
-                        onResult(false, 403, null)
+                        onResult(false, 403, null, null)
                     } else {
-                        onResult(false, response.code, null)
+                        onResult(false, response.code, null, null)
                     }
                 }
             }

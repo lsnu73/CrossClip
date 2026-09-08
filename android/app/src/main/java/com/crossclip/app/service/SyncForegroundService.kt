@@ -42,6 +42,14 @@ class SyncForegroundService : Service() {
 
     private val TAG = "CrossClipService"
 
+    data class DiscoveredDevice(
+        val deviceId: String,
+        val name: String,
+        var ip: String,
+        val httpPort: Int,
+        var lastSeen: Long = System.currentTimeMillis()
+    )
+
     companion object {
         const val CHANNEL_ID = "cross_clip_silent_v2"
         const val NOTIFICATION_ID = 1001
@@ -63,6 +71,15 @@ class SyncForegroundService : Service() {
     private lateinit var sseClient: SseClient
     private var localHttpServer: LocalHttpServer? = null
 
+    // 局域网在线设备字典 (以 deviceId 为主键)
+    private val discoveredDevices = java.util.concurrent.ConcurrentHashMap<String, DiscoveredDevice>()
+    // 连接事务令牌，避免旧 IP 超时回调覆盖新连接状态
+    private val connectTokenCounter = java.util.concurrent.atomic.AtomicLong(0)
+
+    var currentTargetDeviceId: String = ""
+        private set
+    var lastSavedPcIp: String = ""
+        private set
     var currentPcIp: String = ""
         private set
     var currentHttpPort: Int = 18236
@@ -162,10 +179,21 @@ class SyncForegroundService : Service() {
             DebugLogger.log("HEARTBEAT", "后台守护心跳计数: $heartbeatCount (已连接=$connectionState, PC=$currentPcIp)")
             if (currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
                 HttpUploader.sendHeartbeat(currentPcIp, currentHttpPort, pinCode, deviceId, deviceName, 18237) { ok ->
-                    if (!ok && connectionState == 1) {
-                        DebugLogger.log("HEARTBEAT", "心跳上报失败，电脑端可能已退出，切换为搜索中")
+                    if (ok && connectionState == 1) {
+                        val now = System.currentTimeMillis()
+                        val devId = if (currentTargetDeviceId.isNotEmpty()) currentTargetDeviceId else "pc_${currentPcIp.replace('.', '_')}"
+                        val dev = discoveredDevices[devId]
+                        if (dev != null) {
+                            dev.lastSeen = now
+                        } else {
+                            discoveredDevices[devId] = DiscoveredDevice(devId, currentPcName, currentPcIp, currentHttpPort, now)
+                        }
+                    } else if (!ok && connectionState == 1) {
+                        DebugLogger.log("HEARTBEAT", "心跳上报失败，电脑端已离线，清空当前连接并切换为搜索中")
                         connectionState = 0
                         lanDiscovery.isConnected = false
+                        currentPcIp = ""
+                        currentPcName = "未连接"
                         mainHandler.post {
                             updateNotification("正在重新搜索局域网电脑...")
                         }
@@ -257,13 +285,19 @@ class SyncForegroundService : Service() {
 
     private fun loadPreferences() {
         val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
-        pinCode = sp.getString("pin_code", "") ?: ""
         deviceId = sp.getString("device_id", "android_" + Build.MODEL.replace(" ", "_")) ?: "android"
         deviceName = sp.getString("device_name", Build.MODEL) ?: "安卓手机"
         autoSync = sp.getBoolean("auto_sync", true)
-        currentPcIp = sp.getString("last_pc_ip", "") ?: ""
+        currentTargetDeviceId = sp.getString("last_device_id", "") ?: ""
+        lastSavedPcIp = sp.getString("last_pc_ip", "") ?: ""
         currentHttpPort = sp.getInt("last_http_port", 18236)
-        DebugLogger.log("SVC_CONFIG", "加载配置: PC_IP=$currentPcIp, port=$currentHttpPort, pin.len=${pinCode.length}, autoSync=$autoSync")
+        val devPin = if (currentTargetDeviceId.isNotEmpty()) {
+            sp.getString("pin_code_$currentTargetDeviceId", "") ?: ""
+        } else ""
+        pinCode = if (devPin.isNotEmpty()) devPin else (sp.getString("pin_code", "") ?: "")
+        currentPcIp = ""
+        currentPcName = "未连接"
+        DebugLogger.log("SVC_CONFIG", "加载配置: targetId=$currentTargetDeviceId, hintIp=$lastSavedPcIp, port=$currentHttpPort, pin.len=${pinCode.length}, autoSync=$autoSync")
     }
 
     private fun initNetwork() {
@@ -305,9 +339,9 @@ class SyncForegroundService : Service() {
         // 1. 原生 mDNS 零配置自动发现
         nsdHelper = NsdHelper(
             this,
-            onDeviceFound = { name, ip, port ->
-                DebugLogger.log("DISCOVERY", "mDNS 发现设备: name=$name, ip=$ip, port=$port")
-                onDeviceDiscovered(name, ip, port)
+            onDeviceFound = { devId, name, ip, port ->
+                DebugLogger.log("DISCOVERY", "mDNS 发现设备: id=$devId, name=$name, ip=$ip, port=$port")
+                onDeviceDiscovered(devId, name, ip, port)
             },
             onDeviceLost = { name ->
                 DebugLogger.log("DISCOVERY", "mDNS 设备丢失: name=$name")
@@ -319,58 +353,228 @@ class SyncForegroundService : Service() {
         nsdHelper.startDiscovery()
 
         // 2. UDP 局域网广播 + 当前子网并发快速探测 (强力自发现)
-        lanDiscovery = LanDiscovery(this) { ip, httpPort, _, name ->
-            DebugLogger.log("DISCOVERY", "UDP/并发探测发现设备: name=$name, ip=$ip, port=$httpPort")
-            onDeviceDiscovered(name, ip, httpPort)
+        lanDiscovery = LanDiscovery(this) { devId, name, ip, httpPort, _ ->
+            DebugLogger.log("DISCOVERY", "UDP/并发探测发现设备: id=$devId, name=$name, ip=$ip, port=$httpPort")
+            onDeviceDiscovered(devId, name, ip, httpPort)
         }
-        lanDiscovery.startDiscovery(deviceId, deviceName)
-
-        // 若已有保存的 IP 与 PIN 码，自动尝试连接
-        if (currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
-            DebugLogger.log("SVC_NET", "检测到历史 PC 配置，自动发起连接")
-            connectWithPin(currentPcIp, pinCode, currentHttpPort) { _, _, _ -> }
-        }
+        lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp)
     }
 
-    private fun onDeviceDiscovered(name: String, ip: String, httpPort: Int) {
-        if (connectionState == 1) return
-        currentPcIp = ip
-        currentHttpPort = httpPort
-        currentPcName = name
+    fun getDiscoveredDeviceList(): List<DiscoveredDevice> {
+        val now = System.currentTimeMillis()
+        val it = discoveredDevices.entries.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            // 若为当前正常连接中的电脑，保证其在线状态不被超时剔除
+            if (connectionState == 1 && (entry.value.ip == currentPcIp || entry.key == currentTargetDeviceId)) {
+                entry.value.lastSeen = now
+                continue
+            }
+            // 其余设备 15 秒内无探活回应则判定离线，严格剔除
+            if (now - entry.value.lastSeen > 15000L) {
+                it.remove()
+            }
+        }
+        return ArrayList(discoveredDevices.values)
+    }
 
-        if (pinCode.isNotEmpty() && connectionState != 1 && connectionState != -1) {
-            DebugLogger.log("DISCOVERY", "已有 PIN 码，自动验证连接与对等注册: $ip:$httpPort")
-            HttpUploader.verifyPin(ip, httpPort, pinCode, deviceId, deviceName, 18237) { success, statusCode, devName ->
+    /**
+     * 当前目标电脑是否真实在线并被局域网探测到
+     */
+    fun isCurrentDeviceOnline(): Boolean {
+        if (connectionState == 1) return true
+        val target = discoveredDevices[currentTargetDeviceId]
+        if (target != null && System.currentTimeMillis() - target.lastSeen < 15000L) {
+            return true
+        }
+        return discoveredDevices.values.any { it.ip == currentPcIp && System.currentTimeMillis() - it.lastSeen < 15000L }
+    }
+
+    /**
+     * 用户主动点击重新扫描时，强制切断旧连接并清空全部探测缓存
+     */
+    fun triggerRescan() {
+        DebugLogger.log("DISCOVERY", "用户主动触发局域网重新扫描，切断旧连接并清空全部缓存")
+        connectTokenCounter.incrementAndGet()
+        sseClient.disconnect()
+        connectionState = 0
+        lanDiscovery.isConnected = false
+        currentPcIp = ""
+        currentPcName = "未连接"
+        discoveredDevices.clear()
+        try {
+            nsdHelper.stopDiscovery()
+            lanDiscovery.stopDiscovery()
+        } catch (_: Exception) {}
+        nsdHelper.startDiscovery()
+        lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp)
+    }
+
+    /**
+     * 清除本地持久化的历史电脑与 PIN 码记录
+     */
+    fun clearSavedHistory() {
+        DebugLogger.log("SVC_ACTION", "清除保存的历史配置与当前连接")
+        connectTokenCounter.incrementAndGet()
+        sseClient.disconnect()
+        connectionState = 0
+        lanDiscovery.isConnected = false
+        currentTargetDeviceId = ""
+        currentPcIp = ""
+        lastSavedPcIp = ""
+        currentPcName = "未连接"
+        pinCode = ""
+        discoveredDevices.clear()
+
+        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        sp.edit()
+            .remove("last_pc_ip")
+            .remove("last_device_id")
+            .remove("pin_code")
+            .apply()
+        updateNotification("已清除历史配置，重新搜索局域网电脑...")
+        triggerRescan()
+    }
+
+    private fun onDeviceDiscovered(devId: String, name: String, ip: String, httpPort: Int) {
+        val now = System.currentTimeMillis()
+        
+        // 物理 IP 强力归并去重：检索是否存在相同物理 IP 或相同 ID 的已有记录
+        var foundKey: String? = null
+        for ((k, v) in discoveredDevices) {
+            if (v.ip == ip || k == devId) {
+                foundKey = k
+                break
+            }
+        }
+        val finalDevId: String
+        if (foundKey != null) {
+            val oldItem = discoveredDevices.remove(foundKey)
+            // 优先保留非虚拟 IP 的硬件指纹
+            finalDevId = if (!devId.startsWith("pc_")) devId else (oldItem?.deviceId ?: devId)
+            val finalName = if (name.isNotEmpty() && name != "Windows 电脑") name else (oldItem?.name ?: name)
+            discoveredDevices[finalDevId] = DiscoveredDevice(finalDevId, finalName, ip, httpPort, now)
+        } else {
+            finalDevId = devId
+            discoveredDevices[devId] = DiscoveredDevice(devId, name, ip, httpPort, now)
+        }
+
+        // 1. 若当前已成功连接，检测是否发生动态 IP 漂移
+        if (connectionState == 1) {
+            if (finalDevId == currentTargetDeviceId && ip != currentPcIp) {
+                DebugLogger.log("DISCOVERY", "已连接电脑 IP 动态漂移: $currentPcIp -> $ip，触发静默热重连")
+                val token = connectTokenCounter.incrementAndGet()
+                HttpUploader.verifyPin(ip, httpPort, pinCode, deviceId, deviceName, 18237) { success, statusCode, devName, _ ->
+                    if (token != connectTokenCounter.get()) return@verifyPin
+                    mainHandler.post {
+                        if (token != connectTokenCounter.get()) return@post
+                        if (success) {
+                            currentPcIp = ip
+                            currentHttpPort = httpPort
+                            currentPcName = devName ?: name
+                            val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+                            sp.edit().putString("last_pc_ip", ip).apply()
+                            val sseUrl = "http://$ip:$httpPort/events?pin=$pinCode"
+                            sseClient.connect(sseUrl)
+                            updateNotification("已连接电脑 ($currentPcName)")
+                        }
+                    }
+                }
+            }
+            return
+        }
+
+        // 2. 若未连接，检查是否为记忆中的目标电脑，若是则自动触发后台静默握手
+        var shouldTriggerConnect = false
+        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val devPin = sp.getString("pin_code_$finalDevId", "") ?: ""
+        val candidatePin = if (devPin.isNotEmpty()) devPin else pinCode
+
+        if ((currentTargetDeviceId.isEmpty() || currentTargetDeviceId == finalDevId) && candidatePin.isNotEmpty()) {
+            if (connectionState == 0 || (connectionState == -1 && ip != currentPcIp)) {
+                shouldTriggerConnect = true
+            }
+        }
+
+        if (shouldTriggerConnect) {
+            val token = connectTokenCounter.incrementAndGet()
+            connectionState = -1 // 标记正在后台验证，绝不提前污染 currentPcIp
+            DebugLogger.log("DISCOVERY", "目标电脑在线 ($name, $ip, token=$token)，自动执行挑战握手")
+            HttpUploader.verifyPin(ip, httpPort, candidatePin, deviceId, deviceName, 18237) { success, statusCode, devName, retDevId ->
+                if (token != connectTokenCounter.get()) {
+                    DebugLogger.log("SVC_NET", "丢弃过期握手回调 (token: $token)")
+                    return@verifyPin
+                }
                 mainHandler.post {
+                    if (token != connectTokenCounter.get()) return@post
                     if (success) {
+                        // 握手真正通过！原子转正为已连接，更新通信变量
                         connectionState = 1
                         lanDiscovery.isConnected = true
+                        val boundId = retDevId ?: finalDevId
+                        currentTargetDeviceId = boundId
+                        currentPcIp = ip
+                        currentHttpPort = httpPort
                         currentPcName = devName ?: name
+                        pinCode = candidatePin
+
+                        val editor = sp.edit()
+                            .putString("last_device_id", boundId)
+                            .putString("last_pc_ip", ip)
+                            .putInt("last_http_port", httpPort)
+                            .putString("pin_code_$boundId", candidatePin)
+                        editor.apply()
+
                         updateNotification("已连接电脑 ($currentPcName)")
-                        val sseUrl = "http://$ip:$httpPort/events?pin=$pinCode"
+                        val sseUrl = "http://$ip:$httpPort/events?pin=$candidatePin"
                         sseClient.connect(sseUrl)
                     } else if (statusCode == 403) {
                         connectionState = 2
                         updateNotification("PIN 码不匹配，请核对电脑 PIN 码")
+                    } else {
+                        connectionState = 0
                     }
                 }
             }
         }
     }
 
-    fun disconnectCurrentPc() {
-        DebugLogger.log("SVC_ACTION", "手动断开与电脑连接")
+    fun selectTargetDevice(device: DiscoveredDevice) {
+        if (currentTargetDeviceId == device.deviceId && currentPcIp == device.ip && connectionState == 1) return
+        DebugLogger.log("SVC_ACTION", "切换目标电脑: ${device.name} (${device.ip})")
+
+        // 优雅切断旧连接通道，废弃旧事务
+        connectTokenCounter.incrementAndGet()
         sseClient.disconnect()
-        pinCode = ""
-        currentPcName = "未连接"
         connectionState = 0
         lanDiscovery.isConnected = false
 
-        getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
-            .edit()
-            .remove("pin_code")
+        currentTargetDeviceId = device.deviceId
+        currentPcIp = device.ip
+        currentHttpPort = device.httpPort
+        currentPcName = device.name
+
+        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val devPin = sp.getString("pin_code_${device.deviceId}", "") ?: ""
+        if (devPin.isNotEmpty()) {
+            pinCode = devPin
+        }
+
+        sp.edit()
+            .putString("last_device_id", device.deviceId)
+            .putString("last_pc_ip", device.ip)
+            .putInt("last_http_port", device.httpPort)
             .apply()
 
+        updateNotification("已切换到目标电脑: ${device.name}")
+    }
+
+    fun disconnectCurrentPc() {
+        DebugLogger.log("SVC_ACTION", "手动断开与电脑连接")
+        connectTokenCounter.incrementAndGet()
+        sseClient.disconnect()
+        connectionState = 0
+        lanDiscovery.isConnected = false
         updateNotification("已断开连接")
     }
 
@@ -380,25 +584,42 @@ class SyncForegroundService : Service() {
         httpPort: Int = currentHttpPort,
         callback: (success: Boolean, statusCode: Int, name: String?) -> Unit
     ) {
+        val token = connectTokenCounter.incrementAndGet()
         currentPcIp = ip
         pinCode = pin
         currentHttpPort = httpPort
         connectionState = -1 // 验证中
-        DebugLogger.log("SVC_ACTION", "发起 PIN 码配对连接与对等注册: $ip:$httpPort")
+        DebugLogger.log("SVC_ACTION", "发起 PIN 码配对连接 (token=$token): $ip:$httpPort")
 
         val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
-        sp.edit()
+        val editor = sp.edit()
             .putString("last_pc_ip", ip)
             .putString("pin_code", pin)
             .putInt("last_http_port", httpPort)
-            .apply()
+        if (currentTargetDeviceId.isNotEmpty()) {
+            editor.putString("pin_code_$currentTargetDeviceId", pin)
+        }
+        editor.apply()
 
-        HttpUploader.verifyPin(ip, httpPort, pin, deviceId, deviceName, 18237) { success, statusCode, devName ->
+        HttpUploader.verifyPin(ip, httpPort, pin, deviceId, deviceName, 18237) { success, statusCode, devName, retDevId ->
+            if (token != connectTokenCounter.get()) {
+                DebugLogger.log("SVC_NET", "丢弃过期的 connectWithPin 回调 (token: $token)")
+                return@verifyPin
+            }
             mainHandler.post {
+                if (token != connectTokenCounter.get()) return@post
                 if (success) {
                     connectionState = 1
                     lanDiscovery.isConnected = true
                     currentPcName = devName ?: "Windows 电脑"
+                    if (!retDevId.isNullOrEmpty()) {
+                        currentTargetDeviceId = retDevId
+                        val prefs = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+                        prefs.edit()
+                            .putString("last_device_id", retDevId)
+                            .putString("pin_code_$retDevId", pin)
+                            .apply()
+                    }
                     updateNotification("已连接电脑 ($currentPcName)")
                     val sseUrl = "http://$ip:$httpPort/events?pin=$pin"
                     sseClient.connect(sseUrl)
