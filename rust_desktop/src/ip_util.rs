@@ -17,6 +17,7 @@ pub fn get_local_lan_ips() -> Vec<String> {
                 || name_lower.contains("vEthernet")
                 || name_lower.contains("tailscale")
                 || name_lower.contains("zerotier")
+                || name_lower.contains("vmware")
             {
                 continue;
             }
