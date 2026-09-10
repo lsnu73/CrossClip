@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+
+use crate::file_transfer::FileTransferManager;
 
 struct WorkerPool {
     sender: Sender<Box<dyn FnOnce() + Send + 'static>>,
@@ -91,6 +93,22 @@ fn extract_pin_from_query(url: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 解析 URL 的全部 query 参数为键值对。
+///
+/// 文件分块的元数据（file_id / index / total）通过 query 传递，
+/// 其中 file_id 由时间戳+随机数构成、不含需要转义的字符，因此这里不做 URL 解码。
+fn parse_query_params(url: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Some((_, query)) = url.split_once('?') {
+        for pair in query.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                map.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+    map
 }
 
 #[derive(Serialize)]
@@ -220,6 +238,11 @@ impl Broadcaster {
         let mut peers = self.peers.write().unwrap();
         peers.clear();
     }
+
+    /// 获取当前已注册的对等节点列表（供文件传输等模块使用）
+    pub fn get_peers(&self) -> Vec<ClientPeer> {
+        self.peers.read().unwrap().clone()
+    }
 }
 
 fn send_raw_http_post(ip: &str, port: u16, path: &str, json_body: &str) -> bool {
@@ -247,12 +270,166 @@ fn send_raw_http_post(ip: &str, port: u16, path: &str, json_body: &str) -> bool 
     false
 }
 
+/// 在一个已建立的连接上写出一个 HTTP 请求（HTTP/1.1 keep-alive）
+fn write_http_request(
+    writer: &mut TcpStream,
+    host: &str,
+    path: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Result<(), String> {
+    let header = format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        path,
+        host,
+        content_type,
+        body.len()
+    );
+    writer
+        .write_all(header.as_bytes())
+        .map_err(|e| format!("写请求头失败: {}", e))?;
+    writer
+        .write_all(body)
+        .map_err(|e| format!("写请求体失败: {}", e))?;
+    writer.flush().map_err(|e| format!("刷新连接失败: {}", e))?;
+    Ok(())
+}
+
+/// 读取并完整消费一个 HTTP 响应。
+///
+/// 必须把响应体读干净，否则残留字节会与下一个请求的响应「串包」，
+/// 这是 keep-alive 复用连接时最容易踩的坑。
+fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<(), String> {
+    // 1. 状态行
+    let mut status_line = String::new();
+    reader
+        .read_line(&mut status_line)
+        .map_err(|e| format!("读取状态行失败: {}", e))?;
+    if status_line.is_empty() {
+        return Err("连接已被对端关闭".to_string());
+    }
+
+    // 2. 响应头：找到 Content-Length
+    let mut content_length = 0usize;
+    loop {
+        let mut header_line = String::new();
+        let n = reader
+            .read_line(&mut header_line)
+            .map_err(|e| format!("读取响应头失败: {}", e))?;
+        if n == 0 {
+            return Err("连接已被对端关闭".to_string());
+        }
+        if header_line == "\r\n" || header_line == "\n" {
+            break;
+        }
+        let lower = header_line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            content_length = rest.trim().parse::<usize>().unwrap_or(0);
+        }
+    }
+
+    // 3. 响应体
+    if content_length > 0 {
+        let mut body = vec![0u8; content_length];
+        reader
+            .read_exact(&mut body)
+            .map_err(|e| format!("读取响应体失败: {}", e))?;
+    }
+    Ok(())
+}
+
+/// 把文件完整发送到手机端（prepare → chunk×N → complete）。
+///
+/// ## 关键性能优化
+/// 整个文件的**所有分块复用同一条 TCP 连接**（HTTP keep-alive）。
+/// 旧实现每个分块都 `TcpStream::connect_timeout` 新建连接并以 `Connection: close` 收尾，
+/// 传输 100MB 文件会产生上千次 TCP 三次握手，是速度慢的主因之一。
+///
+/// @param on_progress 每完成一个分块回调一次 `(已完成块数, 总块数)`
+pub fn send_file_to_phone(
+    ip: &str,
+    port: u16,
+    file_manager: &crate::file_transfer::FileTransferManager,
+    transfer: &crate::file_transfer::OutgoingTransfer,
+    pin: &str,
+    file_hash: &str,
+    sender_id: &str,
+    mut on_progress: impl FnMut(u32, u32),
+) -> Result<(), String> {
+    let host = format!("{}:{}", ip, port);
+    let socket_addr: SocketAddr = host
+        .parse()
+        .map_err(|_| format!("非法的目标地址: {}", host))?;
+
+    let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(5))
+        .map_err(|e| format!("连接手机失败: {}", e))?;
+    // 关闭 Nagle：每个分块都是一次独立的请求-响应往返，攒包只会徒增延迟
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(60)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+
+    let mut writer = stream
+        .try_clone()
+        .map_err(|e| format!("复制连接句柄失败: {}", e))?;
+    let mut reader = BufReader::new(stream);
+
+    // ---------- 1. 发送文件元数据 ----------
+    let prepare_body = serde_json::json!({
+        "type": "FILE_PREPARE",
+        "file_id": transfer.file_id,
+        "filename": transfer.filename,
+        "file_size": transfer.file_size,
+        "mime_type": "application/octet-stream",
+        "sender_id": sender_id,
+    })
+    .to_string();
+    write_http_request(
+        &mut writer,
+        &host,
+        "/file/prepare",
+        "application/json; charset=utf-8",
+        prepare_body.as_bytes(),
+    )?;
+    read_http_response(&mut reader)?;
+
+    // ---------- 2. 逐块发送（复用同一连接） ----------
+    for idx in 0..transfer.total_chunks {
+        let encrypted = file_manager.get_chunk_encrypted_bytes(&transfer.file_id, idx, pin)?;
+        let path = format!(
+            "/file/chunk?file_id={}&index={}&total={}",
+            transfer.file_id, idx, transfer.total_chunks
+        );
+        write_http_request(&mut writer, &host, &path, "application/octet-stream", &encrypted)?;
+        read_http_response(&mut reader)?;
+        on_progress(idx + 1, transfer.total_chunks);
+    }
+
+    // ---------- 3. 发送完成信号（携带整文件哈希供手机端校验） ----------
+    let complete_body = serde_json::json!({
+        "type": "FILE_COMPLETE",
+        "file_id": transfer.file_id,
+        "file_hash": file_hash,
+    })
+    .to_string();
+    write_http_request(
+        &mut writer,
+        &host,
+        "/file/complete",
+        "application/json; charset=utf-8",
+        complete_body.as_bytes(),
+    )?;
+    read_http_response(&mut reader)?;
+
+    Ok(())
+}
+
 pub fn start_http_server(
     port: u16,
     pin_code: Arc<RwLock<String>>,
     device_name: String,
     broadcaster: Broadcaster,
     on_text_received: Arc<dyn Fn(String, String) + Send + Sync + 'static>,
+    file_manager: Arc<FileTransferManager>,
 ) {
     std::thread::spawn(move || {
         let addr = format!("0.0.0.0:{}", port);
@@ -271,6 +448,7 @@ pub fn start_http_server(
             let device_name_clone = device_name.clone();
             let broadcaster_clone = broadcaster.clone();
             let on_received_clone = on_text_received.clone();
+            let file_manager_clone = file_manager.clone();
 
             if request.url().starts_with("/events") {
                 // SSE 长连接会持久阻塞在读取循环，使用独立线程处理，绝不耗尽普通 API 线程池
@@ -281,6 +459,7 @@ pub fn start_http_server(
                         device_name_clone,
                         broadcaster_clone,
                         on_received_clone,
+                        file_manager_clone,
                     );
                 });
             } else {
@@ -291,6 +470,7 @@ pub fn start_http_server(
                         device_name_clone,
                         broadcaster_clone,
                         on_received_clone,
+                        file_manager_clone,
                     );
                 });
             }
@@ -304,6 +484,7 @@ fn handle_client_request(
     device_name: String,
     broadcaster: Broadcaster,
     on_text_received: Arc<dyn Fn(String, String) + Send + Sync + 'static>,
+    file_manager: Arc<FileTransferManager>,
 ) {
     let cors_header = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]).unwrap();
     let cors_headers_allow = Header::from_bytes(
@@ -386,6 +567,7 @@ fn handle_client_request(
                 status: "error".to_string(),
                 auth: Some(false),
                 device_name: None,
+                device_id: None,
                 message: Some("pin_mismatch".to_string()),
             })
             .unwrap();
@@ -509,6 +691,7 @@ fn handle_client_request(
                     status: "error".to_string(),
                     auth: Some(false),
                     device_name: None,
+                    device_id: None,
                     message: Some("pin_mismatch".to_string()),
                 })
                 .unwrap();
@@ -546,6 +729,173 @@ fn handle_client_request(
             }
         }
 
+        let resp = Response::from_string(r#"{"status":"error","message":"invalid_payload"}"#)
+            .with_status_code(StatusCode(400))
+            .with_header(cors_header)
+            .with_header(content_type);
+        let _ = request.respond(resp);
+        return;
+    }
+
+    // ==================== 文件传输端点 ====================
+
+    if path == "/file/prepare" && method == Method::Post {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_ok() {
+            if let Ok(prepare) = serde_json::from_str::<crate::file_transfer::FilePrepare>(&body) {
+                let current_pin = pin_code.read().unwrap().clone();
+                match file_manager.handle_prepare(&prepare, &current_pin) {
+                    Ok(()) => {
+                        let resp = serde_json::json!({
+                            "status": "ok",
+                            "message": "准备接收文件",
+                            "file_id": prepare.file_id
+                        });
+                        let resp_str = resp.to_string();
+                        let resp = Response::from_string(resp_str)
+                            .with_header(cors_header)
+                            .with_header(content_type);
+                        let _ = request.respond(resp);
+                        return;
+                    }
+                    Err(e) => {
+                        let resp = serde_json::json!({
+                            "status": "error",
+                            "message": e
+                        });
+                        let resp = Response::from_string(resp.to_string())
+                            .with_status_code(StatusCode(500))
+                            .with_header(cors_header)
+                            .with_header(content_type);
+                        let _ = request.respond(resp);
+                        return;
+                    }
+                }
+            }
+        }
+        let resp = Response::from_string(r#"{"status":"error","message":"invalid_payload"}"#)
+            .with_status_code(StatusCode(400))
+            .with_header(cors_header)
+            .with_header(content_type);
+        let _ = request.respond(resp);
+        return;
+    }
+
+    if path == "/file/chunk" && method == Method::Post {
+        // 二进制协议：分块密文直接作为请求体（省去 Base64/JSON 开销），元数据走 query 参数
+        let params = parse_query_params(&url);
+        let file_id = params.get("file_id").cloned().unwrap_or_default();
+        let chunk_index = params.get("index").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let total_chunks = params.get("total").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+
+        if file_id.is_empty() {
+            let resp = Response::from_string(r#"{"status":"error","message":"missing_file_id"}"#)
+                .with_status_code(StatusCode(400))
+                .with_header(cors_header)
+                .with_header(content_type);
+            let _ = request.respond(resp);
+            return;
+        }
+
+        // 一次性读入二进制密文 body
+        let mut payload: Vec<u8> = Vec::new();
+        if request.as_reader().read_to_end(&mut payload).is_err() {
+            let resp = Response::from_string(r#"{"status":"error","message":"read_body_failed"}"#)
+                .with_status_code(StatusCode(400))
+                .with_header(cors_header)
+                .with_header(content_type);
+            let _ = request.respond(resp);
+            return;
+        }
+
+        let current_pin = pin_code.read().unwrap().clone();
+        match file_manager.handle_chunk(&file_id, chunk_index, total_chunks, &payload, &current_pin) {
+            Ok((received, total)) => {
+                // 通过 SSE 广播接收进度给所有长连接客户端
+                let progress_event = serde_json::json!({
+                    "type": "FILE_PROGRESS",
+                    "file_id": file_id,
+                    "chunk_index": chunk_index,
+                    "total_chunks": total,
+                    "received_chunks": received
+                });
+                let msg = format!("data: {}\n\n", progress_event);
+                {
+                    let mut clients = broadcaster.clients.lock().unwrap();
+                    clients.retain(|client| client.send(msg.clone()).is_ok());
+                }
+
+                let resp = serde_json::json!({
+                    "status": "ok",
+                    "received": received,
+                    "total": total
+                });
+                let resp = Response::from_string(resp.to_string())
+                    .with_header(cors_header)
+                    .with_header(content_type);
+                let _ = request.respond(resp);
+            }
+            Err(e) => {
+                let resp = serde_json::json!({
+                    "status": "error",
+                    "message": e
+                });
+                let resp = Response::from_string(resp.to_string())
+                    .with_status_code(StatusCode(500))
+                    .with_header(cors_header)
+                    .with_header(content_type);
+                let _ = request.respond(resp);
+            }
+        }
+        return;
+    }
+
+    if path == "/file/complete" && method == Method::Post {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_ok() {
+            if let Ok(complete) = serde_json::from_str::<crate::file_transfer::FileComplete>(&body) {
+                let current_pin = pin_code.read().unwrap().clone();
+                match file_manager.handle_complete(&complete, &current_pin) {
+                    Ok(final_path) => {
+                        let path_str = final_path.to_string_lossy().to_string();
+                        // 通过 SSE 广播文件接收完成事件
+                        let complete_event = serde_json::json!({
+                            "type": "FILE_RECEIVED",
+                            "file_id": complete.file_id,
+                            "path": path_str
+                        });
+                        let msg = format!("data: {}\n\n", complete_event);
+                        {
+                            let mut clients = broadcaster.clients.lock().unwrap();
+                            clients.retain(|client| client.send(msg.clone()).is_ok());
+                        }
+
+                        let resp = serde_json::json!({
+                            "status": "ok",
+                            "message": "文件接收完成",
+                            "path": path_str
+                        });
+                        let resp = Response::from_string(resp.to_string())
+                            .with_header(cors_header)
+                            .with_header(content_type);
+                        let _ = request.respond(resp);
+                        return;
+                    }
+                    Err(e) => {
+                        let resp = serde_json::json!({
+                            "status": "error",
+                            "message": e
+                        });
+                        let resp = Response::from_string(resp.to_string())
+                            .with_status_code(StatusCode(500))
+                            .with_header(cors_header)
+                            .with_header(content_type);
+                        let _ = request.respond(resp);
+                        return;
+                    }
+                }
+            }
+        }
         let resp = Response::from_string(r#"{"status":"error","message":"invalid_payload"}"#)
             .with_status_code(StatusCode(400))
             .with_header(cors_header)

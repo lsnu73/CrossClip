@@ -10,7 +10,8 @@ import java.util.concurrent.TimeUnit
 
 class SseClient(
     private val onMessageReceived: (encrypted: String, hash: String, senderId: String) -> Unit,
-    private val onConnectionChanged: (Boolean) -> Unit
+    private val onConnectionChanged: (Boolean) -> Unit,
+    private val onFileEvent: ((eventType: String, data: JSONObject) -> Unit)? = null
 ) {
     private val TAG = "CrossClipSSE"
     @Volatile
@@ -58,12 +59,19 @@ class SseClient(
                                     if (data.isNotEmpty()) {
                                         try {
                                             val json = JSONObject(data)
-                                            val enc = json.optString("encrypted", "")
-                                            val hash = json.optString("hash", "")
-                                            val sender = json.optString("sender_id", "电脑端")
-                                            if (enc.isNotEmpty()) {
-                                                DebugLogger.log("SSE", "收到电脑端下发数据: hash=$hash, sender=$sender, 加密包长度=${enc.length}")
-                                                onMessageReceived(enc, hash, sender)
+                                            val type = json.optString("type", "")
+                                            // 处理文件传输相关事件
+                                            if (type.startsWith("FILE_")) {
+                                                DebugLogger.log("SSE", "收到文件传输事件: type=$type")
+                                                onFileEvent?.invoke(type, json)
+                                            } else {
+                                                val enc = json.optString("encrypted", "")
+                                                val hash = json.optString("hash", "")
+                                                val sender = json.optString("sender_id", "电脑端")
+                                                if (enc.isNotEmpty()) {
+                                                    DebugLogger.log("SSE", "收到电脑端下发数据: hash=$hash, sender=$sender, 加密包长度=${enc.length}")
+                                                    onMessageReceived(enc, hash, sender)
+                                                }
                                             }
                                         } catch (e: Exception) {
                                             DebugLogger.log("SSE", "解析 data JSON 异常: ${e.message}")
