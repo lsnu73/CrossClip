@@ -3,6 +3,7 @@ package com.crossclip.app.network
 import android.content.Context
 import android.net.wifi.WifiManager
 import android.util.Log
+import com.crossclip.app.util.DebugLogger
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -103,15 +104,83 @@ class LanDiscovery(
     private var currentHintIp: String = ""
     private var currentDeviceId: String = "android"
 
-    fun startDiscovery(deviceId: String = "android", deviceName: String = "安卓手机", hintIp: String = "") {
+    // ==================== 自动搜索策略（省电） ====================
+
+    @Volatile
+    private var autoSearchEnabledState: Boolean = true
+
+    /**
+     * 是否开启「持续自动搜索」。关闭后仅在手动点击「重新扫描」时做有限轮次扫描。
+     *
+     * 这里声明为只读属性：写入统一走带副作用的 [setAutoSearchEnabled]（会立即中断
+     * 搜索循环并释放 socket / MulticastLock）。若写成 `var`，其自动生成的 setter 会与
+     * 该方法产生 JVM 签名冲突（Platform declaration clash: setAutoSearchEnabled(Z)V）。
+     */
+    val autoSearchEnabled: Boolean
+        get() = autoSearchEnabledState
+
+    /** 本轮自动搜索的时间窗起点，用于 0-5 / 5-15 / >15 分钟的分级降频 */
+    @Volatile
+    private var searchWindowStartMs: Long = 0L
+
+    /** 手动扫描模式下剩余的扫描轮数 */
+    @Volatile
+    private var manualRoundsLeft: Int = 0
+
+    companion object {
+        /** 0-5 分钟：正常扫描间隔 */
+        private const val SCAN_INTERVAL_FAST_MS = 2500L
+
+        /** 5-15 分钟：降频后的扫描间隔（每分钟一次） */
+        private const val SCAN_INTERVAL_SLOW_MS = 60_000L
+
+        /** 超过该时长仍未发现电脑就停止自动搜索，等待用户手动触发 */
+        private const val AUTO_SEARCH_STOP_MS = 15 * 60 * 1000L
+
+        /** 超过该时长开始降频 */
+        private const val AUTO_SEARCH_SLOWDOWN_MS = 5 * 60 * 1000L
+
+        /** 手动扫描模式下实际执行的扫描轮数 */
+        private const val MANUAL_SCAN_ROUNDS = 3
+    }
+
+    /**
+     * 设置是否开启持续自动搜索。
+     *
+     * 关闭时会**立即**中断当前搜索循环并释放 UDP socket 与 MulticastLock，
+     * 避免夜间电脑关机后手机端空转 8 小时以上持续耗电。
+     */
+    fun setAutoSearchEnabled(enabled: Boolean) {
+        if (autoSearchEnabledState == enabled) return
+        autoSearchEnabledState = enabled
+        DebugLogger.log(TAG, "自动搜索开关变更为: ${if (enabled) "开启" else "关闭"}")
+        if (!enabled) {
+            isSearching = false
+            try {
+                socket?.close()
+            } catch (_: Exception) {}
+            socket = null
+            releaseMulticastLock()
+        }
+    }
+
+    fun startDiscovery(
+        deviceId: String = "android",
+        deviceName: String = "安卓手机",
+        hintIp: String = "",
+        manualScan: Boolean = false
+    ) {
         if (isSearching) return
         isSearching = true
         currentHintIp = hintIp
         currentDeviceId = deviceId
+        // 每次重新搜索都重置时间窗；手动扫描模式下只执行有限轮数
+        searchWindowStartMs = System.currentTimeMillis()
+        manualRoundsLeft = if (manualScan) MANUAL_SCAN_ROUNDS else 0
         acquireMulticastLock()
 
         if (scanExecutor == null || scanExecutor?.isShutdown == true || scanExecutor?.isTerminated == true) {
-            scanExecutor = java.util.concurrent.Executors.newFixedThreadPool(16)
+            scanExecutor = Executors.newFixedThreadPool(16)
         }
 
         // 1. 启动 UDP 广播探测与应答监听
@@ -194,6 +263,7 @@ class LanDiscovery(
             }.toString().toByteArray(Charsets.UTF_8)
 
             while (isSearching) {
+                // 1. 向所有广播地址发送 UDP DISCOVER 探测
                 val broadcastAddrs = getBroadcastAddresses()
                 for (addr in broadcastAddrs) {
                     try {
@@ -202,21 +272,54 @@ class LanDiscovery(
                     } catch (_: Exception) {}
                 }
 
-                if (!isConnected) {
-                    // 未连接状态：全网段高频并发探测
-                    fastSubnetScan()
-                    try {
-                        Thread.sleep(2500)
-                    } catch (e: InterruptedException) {
-                        break
-                    }
-                } else {
-                    // 已连接状态：转入低频保活探测 (休眠 8 秒)，节约功耗同时持续感知网络变化
+                // 2. 已连接：转入低频保活（8 秒一轮），仅用于感知网络变化与 IP 漂移
+                if (isConnected) {
                     try {
                         Thread.sleep(8000)
                     } catch (e: InterruptedException) {
                         break
                     }
+                    continue
+                }
+
+                // 3. 未连接：并发探测当前子网全部 IP
+                fastSubnetScan()
+
+                // 4. 自动搜索已关闭：仅完成手动扫描的有限轮数后停止
+                if (!autoSearchEnabled) {
+                    if (manualRoundsLeft > 0) {
+                        manualRoundsLeft--
+                        try {
+                            Thread.sleep(SCAN_INTERVAL_FAST_MS)
+                        } catch (e: InterruptedException) {
+                            break
+                        }
+                        continue
+                    }
+                    DebugLogger.log(TAG, "自动搜索已关闭，停止局域网扫描（等待用户手动触发）")
+                    isSearching = false
+                    break
+                }
+
+                // 5. 分阶段降频：0-5 分钟正常 → 5-15 分钟每分钟一次 → 超过 15 分钟停止
+                val elapsed = System.currentTimeMillis() - searchWindowStartMs
+                val interval = when {
+                    elapsed < AUTO_SEARCH_SLOWDOWN_MS -> SCAN_INTERVAL_FAST_MS
+                    elapsed < AUTO_SEARCH_STOP_MS -> SCAN_INTERVAL_SLOW_MS
+                    else -> {
+                        DebugLogger.log(
+                            TAG,
+                            "自动搜索已持续 ${elapsed / 60000} 分钟仍未发现电脑，停止搜索等待手动触发"
+                        )
+                        isSearching = false
+                        break
+                    }
+                }
+
+                try {
+                    Thread.sleep(interval)
+                } catch (e: InterruptedException) {
+                    break
                 }
             }
         }.start()
