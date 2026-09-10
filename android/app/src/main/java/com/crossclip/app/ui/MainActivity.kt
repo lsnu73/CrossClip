@@ -18,14 +18,18 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.FileProvider
 import com.crossclip.app.R
 import com.crossclip.app.BuildConfig
 import com.crossclip.app.service.SyncForegroundService
 import com.crossclip.app.shizuku.ShizukuClipboardManager
 import com.crossclip.app.util.PermissionHelper
 import com.crossclip.app.util.DebugLogger
+import com.crossclip.app.util.SaveDirManager
 import rikka.shizuku.Shizuku
 
 class MainActivity : AppCompatActivity() {
@@ -48,6 +52,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnLockTaskGuide: Button
     private lateinit var switchHideRecents: SwitchCompat
     private lateinit var btnSilenceNotification: Button
+
+    // 自动搜索开关（省电）
+    private lateinit var switchAutoSearch: SwitchCompat
+    private lateinit var tvAutoSearchDesc: TextView
+
+    // 通知权限检测
+    private lateinit var tvNotificationBadge: TextView
+    private lateinit var btnNotificationPerm: Button
+
+    // 接收文件保存目录
+    private lateinit var tvSaveDirPath: TextView
+    private lateinit var btnChangeSaveDir: Button
+    private lateinit var tvResetSaveDir: TextView
 
     private lateinit var tvShizukuBadge: TextView
     private lateinit var tvShizukuDesc: TextView
@@ -72,6 +89,35 @@ class MainActivity : AppCompatActivity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var isDestroyedActivity = false
+
+    /** 初始化阶段回填控件状态时置为 true，避免误触发开关的切换副作用 */
+    private var isInitializingUi = false
+
+    /**
+     * 目录选择器：用于让用户自定义「接收文件保存目录」。
+     * 选中的目录会以持久化 content:// URI 授权保存，进程重启后依然可写入。
+     */
+    private val pickSaveDirLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            SaveDirManager.setCustomDir(this, uri)
+            updateSaveDirUI()
+            Toast.makeText(this, "保存目录已更新", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** 通知权限申请器（Android 13+ 需要运行时授权才能显示文件传输进度） */
+    private val notificationPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        updateNotificationBadge()
+        Toast.makeText(
+            this,
+            if (granted) "通知权限已开启，可正常显示文件传输进度" else "未授予通知权限，文件传输进度将无法在通知栏展示",
+            Toast.LENGTH_LONG
+        ).show()
+    }
 
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { _, grantResult ->
         runOnUiThread {
@@ -113,10 +159,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun applyHideFromRecentsPreference() {
-        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         val hideRecents = sp.getBoolean("hide_recents", false)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            val am = getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
+            val am = getSystemService(ACTIVITY_SERVICE) as? android.app.ActivityManager
             am?.appTasks?.forEach { task ->
                 try {
                     task.setExcludeFromRecents(hideRecents)
@@ -152,6 +198,15 @@ class MainActivity : AppCompatActivity() {
         switchHideRecents = findViewById(R.id.switch_hide_recents)
         btnSilenceNotification = findViewById(R.id.btn_silence_notification)
 
+        // 自动搜索 / 通知权限 / 保存目录 相关控件
+        switchAutoSearch = findViewById(R.id.switch_auto_search)
+        tvAutoSearchDesc = findViewById(R.id.tv_auto_search_desc)
+        tvNotificationBadge = findViewById(R.id.tv_notification_badge)
+        btnNotificationPerm = findViewById(R.id.btn_notification_perm)
+        tvSaveDirPath = findViewById(R.id.tv_save_dir_path)
+        btnChangeSaveDir = findViewById(R.id.btn_change_save_dir)
+        tvResetSaveDir = findViewById(R.id.tv_reset_save_dir)
+
         tvShizukuBadge = findViewById(R.id.tv_shizuku_badge)
         tvShizukuDesc = findViewById(R.id.tv_shizuku_desc)
         tvShizukuDebug = findViewById(R.id.tv_shizuku_debug)
@@ -170,7 +225,11 @@ class MainActivity : AppCompatActivity() {
         btnExportLogs = findViewById(R.id.btn_export_logs)
         btnClearLogs = findViewById(R.id.btn_clear_logs)
 
-        tvLogFilePath.text = "日志路径: ${DebugLogger.getLogFilePath()}"
+        tvLogFilePath.text = "日志路径（点击打开目录）: ${DebugLogger.getLogFilePath()}"
+        // p2: 点击日志路径文本 → 调起系统文件管理器打开日志所在目录
+        tvLogFilePath.setOnClickListener {
+            openLogDirectory()
+        }
 
         btnViewLogs.setOnClickListener {
             showLogsDialog()
@@ -178,7 +237,7 @@ class MainActivity : AppCompatActivity() {
 
         btnCopyLogs.setOnClickListener {
             val allLogs = DebugLogger.readAll()
-            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("CrossClip Logs", allLogs))
             Toast.makeText(this, "已将全量运行日志复制到剪贴板", Toast.LENGTH_SHORT).show()
         }
@@ -271,7 +330,7 @@ class MainActivity : AppCompatActivity() {
 
         switchAutoSync.setOnCheckedChangeListener { _, isChecked ->
             cardManualSync.visibility = if (isChecked) View.GONE else View.VISIBLE
-            val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+            val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
             sp.edit().putBoolean("auto_sync", isChecked).apply()
             startSyncService()
         }
@@ -281,7 +340,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         switchHideRecents.setOnCheckedChangeListener { _, isChecked ->
-            val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+            val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
             sp.edit().putBoolean("hide_recents", isChecked).apply()
             applyHideFromRecentsPreference()
             if (isChecked) {
@@ -310,6 +369,51 @@ class MainActivity : AppCompatActivity() {
             } else {
                 Toast.makeText(this, "已隐藏通知中心常驻通知", Toast.LENGTH_SHORT).show()
             }
+        }
+
+        // ---------- 自动搜索开关（省电策略） ----------
+        switchAutoSearch.setOnCheckedChangeListener { _, isChecked ->
+            // 初始化回填状态时不应触发真实切换（否则会重启搜索并弹出 Toast）
+            if (isInitializingUi) return@setOnCheckedChangeListener
+            SyncForegroundService.instance?.setAutoSearchEnabled(isChecked)
+            refreshAutoSearchUI(isChecked)
+            Toast.makeText(
+                this,
+                if (isChecked) "已开启自动搜索电脑" else "已关闭自动搜索，可点击「重新扫描」手动查找",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        // ---------- 通知权限检测 ----------
+        btnNotificationPerm.setOnClickListener {
+            if (isNotificationEnabled()) {
+                Toast.makeText(this, "通知权限已开启，文件传输进度可正常展示", Toast.LENGTH_SHORT).show()
+            } else {
+                requestNotificationPermission()
+            }
+        }
+
+        // ---------- 接收文件保存目录 ----------
+        btnChangeSaveDir.setOnClickListener {
+            // 调起系统文件选择器（SAF）让用户挑选目录
+            try {
+                pickSaveDirLauncher.launch(null)
+            } catch (e: Exception) {
+                Toast.makeText(this, "无法打开目录选择器: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        tvSaveDirPath.setOnClickListener {
+            // 点击路径文本本身 → 调起文件管理器打开该目录
+            if (!SaveDirManager.openDir(this)) {
+                Toast.makeText(this, "未能打开文件管理器，请手动前往该目录", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        tvResetSaveDir.setOnClickListener {
+            SaveDirManager.resetToDefault(this)
+            updateSaveDirUI()
+            Toast.makeText(this, "已恢复默认保存目录", Toast.LENGTH_SHORT).show()
         }
 
         btnConnectPc.setOnClickListener {
@@ -402,7 +506,7 @@ class MainActivity : AppCompatActivity() {
             .setMessage(DebugLogger.readTail(200))
             .setPositiveButton("确定", null)
             .setNegativeButton("复制全部") { _, _ ->
-                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("CrossClip Logs", DebugLogger.readAll()))
                 Toast.makeText(this, "已复制全部日志", Toast.LENGTH_SHORT).show()
             }
@@ -435,7 +539,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadConfig() {
-        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         val isAuto = sp.getBoolean("auto_sync", true)
         switchAutoSync.isChecked = isAuto
         switchHideRecents.isChecked = sp.getBoolean("hide_recents", false)
@@ -449,6 +553,117 @@ class MainActivity : AppCompatActivity() {
         val lastIp = sp.getString("last_pc_ip", "") ?: ""
         if (lastIp.isNotEmpty()) {
             etManualIp.setText(lastIp)
+        }
+
+        // 自动搜索开关（默认开启）
+        val autoSearch = sp.getBoolean("auto_search_enabled", true)
+        isInitializingUi = true
+        switchAutoSearch.isChecked = autoSearch
+        isInitializingUi = false
+        refreshAutoSearchUI(autoSearch)
+
+        // 保存目录与通知权限状态的初始刷新
+        updateSaveDirUI()
+        updateNotificationBadge()
+    }
+
+    // ==================== 自动搜索开关 ====================
+
+    /** 刷新自动搜索开关的说明文案（不弹 Toast，供初始化与切换共用） */
+    private fun refreshAutoSearchUI(enabled: Boolean) {
+        tvAutoSearchDesc.text = if (enabled) {
+            "5 分钟后降频、15 分钟后停止，避免夜间空转耗电"
+        } else {
+            "已关闭自动搜索，点击「重新扫描」手动查找电脑"
+        }
+    }
+
+    // ==================== 通知权限 ====================
+
+    /** 是否已授予通知权限 */
+    private fun isNotificationEnabled(): Boolean {
+        return NotificationManagerCompat.from(this).areNotificationsEnabled()
+    }
+
+    /** 刷新通知权限徽标与按钮文案 */
+    private fun updateNotificationBadge() {
+        val enabled = isNotificationEnabled()
+        tvNotificationBadge.text = if (enabled) "✅ 已开启" else "⚠️ 未开启"
+        tvNotificationBadge.setTextColor(Color.parseColor(if (enabled) "#10B981" else "#EF4444"))
+        btnNotificationPerm.text = if (enabled) "已开启" else "去开启"
+    }
+
+    /**
+     * 申请通知权限。
+     * Android 13+ 走运行时权限申请；更低版本不存在该运行时权限，直接跳系统通知设置页。
+     */
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                notificationPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            } catch (_: Exception) {
+                openAppNotificationSettings()
+            }
+        } else {
+            openAppNotificationSettings()
+        }
+    }
+
+    /** 跳转到本应用的通知设置页 */
+    private fun openAppNotificationSettings() {
+        try {
+            val intent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
+            }
+            startActivity(intent)
+        } catch (_: Exception) {
+            Toast.makeText(this, "请在系统设置中开启 CrossClip 的通知权限", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // ==================== 保存目录 ====================
+
+    /** 刷新保存目录的展示路径与「恢复默认」入口可见性 */
+    private fun updateSaveDirUI() {
+        tvSaveDirPath.text = SaveDirManager.getDisplayPath(this)
+        tvResetSaveDir.visibility = if (SaveDirManager.hasCustomDir(this)) View.VISIBLE else View.GONE
+    }
+
+    // ==================== 日志目录 ====================
+
+    /**
+     * 打开日志所在目录。
+     * 日志位于 App 私有外部目录，用 FileProvider 暴露后以 folder MIME 交给文件管理器打开；
+     * 若系统没有支持该 MIME 的文件管理器，则降级为 Toast 展示真实路径。
+     */
+    private fun openLogDirectory() {
+        val file = DebugLogger.getPrimaryLogFile()
+        val dir = file?.parentFile
+        if (dir == null || !dir.exists()) {
+            Toast.makeText(this, "日志目录尚未生成", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", dir)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "resource/folder")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            if (intent.resolveActivity(packageManager) != null) {
+                startActivity(intent)
+            } else {
+                Toast.makeText(
+                    this,
+                    "未找到可打开目录的文件管理器\n路径: ${dir.absolutePath}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(
+                this,
+                "打开日志目录失败: ${e.message}\n路径: ${dir.absolutePath}",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -495,7 +710,7 @@ class MainActivity : AppCompatActivity() {
             .setSingleChoiceItems(items, selectedIndex) { dialog, which ->
                 val chosen = devices[which]
                 service.selectTargetDevice(chosen)
-                val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+                val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
                 val devPin = sp.getString("pin_code_${chosen.deviceId}", "") ?: ""
                 etPinCode.setText(devPin)
                 etPinCode.isEnabled = true
@@ -607,14 +822,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun promptMiuiKeepAliveIfNeeded() {
-        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         if (sp.getBoolean("miui_keepalive_prompted", false)) return
         val manufacturer = Build.MANUFACTURER.lowercase()
         if (!manufacturer.contains("xiaomi") && !manufacturer.contains("redmi")) return
 
         sp.edit().putBoolean("miui_keepalive_prompted", true).apply()
 
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
         if (powerManager.isIgnoringBatteryOptimizations(packageName)) return
 
         AlertDialog.Builder(this)
