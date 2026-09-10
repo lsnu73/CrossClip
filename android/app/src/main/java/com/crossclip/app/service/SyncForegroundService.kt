@@ -27,6 +27,7 @@ import com.crossclip.app.network.HttpUploader
 import com.crossclip.app.network.LanDiscovery
 import com.crossclip.app.network.LocalHttpServer
 import com.crossclip.app.network.NsdHelper
+import com.crossclip.app.network.FileReceiver
 import com.crossclip.app.network.SseClient
 import com.crossclip.app.shizuku.ShizukuClipboardManager
 import com.crossclip.app.shizuku.ShizukuPrivilegeHelper
@@ -51,8 +52,17 @@ class SyncForegroundService : Service() {
     )
 
     companion object {
+        /** 静默守护通知渠道（IMPORTANCE_MIN，可在系统设置中关闭展示） */
         const val CHANNEL_ID = "cross_clip_silent_v2"
+
+        /** 文件传输通知渠道（IMPORTANCE_LOW，需要展示可见进度条，故与静默渠道分离） */
+        const val CHANNEL_ID_FILE = "crossclip_file_transfer"
+
         const val NOTIFICATION_ID = 1001
+
+        /** 文件传输通知 ID（与常驻通知错开，避免互相覆盖） */
+        const val NOTIFICATION_ID_FILE = 2002
+
         const val ACTION_MANUAL_SEND = "com.crossclip.app.ACTION_MANUAL_SEND"
         const val ACTION_WATCHDOG = "com.crossclip.app.ACTION_WATCHDOG"
         private const val WATCHDOG_INTERVAL_MS = 2 * 60 * 1000L
@@ -97,6 +107,10 @@ class SyncForegroundService : Service() {
     private var deviceId: String = "android_phone"
     private var deviceName: String = "安卓手机"
     private var autoSync: Boolean = true
+
+    /** 是否开启「持续自动搜索电脑」。关闭后需用户手动点击「重新扫描」 */
+    private var autoSearchEnabled: Boolean = true
+
     @Volatile
     private var selfTestWriteInProgress = false
     private var wakeLock: PowerManager.WakeLock? = null
@@ -107,6 +121,10 @@ class SyncForegroundService : Service() {
     private var heartbeatCount = 0L
     private var lastHeartbeatNotify = 0L
     private var lastSyncEvent = "等待剪贴板变化"
+
+    /** 最近一次上报的接收进度百分比，用于通知节流（-1 表示尚未开始） */
+    @Volatile
+    private var lastFileReceiveProgress = -1
 
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
         DebugLogger.log("CLIP_SYS", "原生 PrimaryClipChangedListener 触发")
@@ -122,7 +140,7 @@ class SyncForegroundService : Service() {
         ShizukuClipboardManager.init(applicationContext)
         ShizukuPrivilegeHelper.applySystemWhitelists(applicationContext)
 
-        clipboardManager = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboardManager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         clipboardManager.addPrimaryClipChangedListener(clipListener)
 
         // 注册 Shizuku 底层特权剪贴板变化监听
@@ -156,6 +174,71 @@ class SyncForegroundService : Service() {
                 }
             }
         }
+
+        // 设置文件传输回调（接收电脑端推送的文件）
+        localHttpServer?.setFileTransferCallback(object : LocalHttpServer.FileTransferCallback {
+
+            /** 准备接收：在 App 私有缓存建临时文件，并弹出「正在接收」通知 */
+            override fun onFilePrepareReceived(
+                fileId: String, filename: String, fileSize: Long, mimeType: String, senderId: String
+            ): Boolean {
+                DebugLogger.log("FILE_RECEIVE", "收到电脑端文件准备: $filename ($fileSize bytes)")
+                lastFileReceiveProgress = -1
+                mainHandler.post {
+                    updateNotification("📥 正在接收文件: $filename")
+                    showFileReceiveNotification(filename, fileSize)
+                }
+                return FileReceiver.prepareReceive(applicationContext, fileId, filename, fileSize)
+            }
+
+            /** 接收分块：payload 为二进制密文，此处解密后写入临时文件 */
+            override fun onFileChunkReceived(
+                fileId: String, chunkIndex: Int, totalChunks: Int, payload: ByteArray
+            ): Pair<Int, Int>? {
+                return try {
+                    val decrypted = CryptoUtil.decryptFromBytes(payload, pinCode)
+                    val result = FileReceiver.receiveChunk(fileId, chunkIndex, totalChunks, decrypted)
+                    if (result != null) {
+                        val (received, total) = result
+                        if (total > 0) {
+                            val progress = (received * 100) / total
+                            // 节流：进度每跨越 5% 才刷新一次通知，避免 1MB 分块高频刷屏造成卡顿
+                            if (progress >= lastFileReceiveProgress + 5 || progress == 100) {
+                                lastFileReceiveProgress = progress
+                                mainHandler.post {
+                                    updateNotification("📥 接收文件中: $progress%")
+                                    showFileReceiveProgressNotification(progress)
+                                }
+                            }
+                        }
+                    }
+                    result
+                } catch (e: Exception) {
+                    DebugLogger.log("FILE_RECEIVE", "解密文件块失败: ${e.message}", e)
+                    null
+                }
+            }
+
+            /** 接收完成：校验哈希并落盘到用户配置的目录 */
+            override fun onFileCompleteReceived(fileId: String, fileHash: String): String? {
+                val result = FileReceiver.completeReceive(applicationContext, fileId, fileHash)
+                if (result != null) {
+                    DebugLogger.log("FILE_RECEIVE", "文件接收完成: $result")
+                    mainHandler.post {
+                        updateNotification("✅ 文件接收完成")
+                        showFileReceiveCompleteNotification(result)
+                    }
+                } else {
+                    DebugLogger.log("FILE_RECEIVE", "文件接收失败: 哈希不匹配或数据不完整")
+                    mainHandler.post {
+                        updateNotification("❌ 文件接收失败")
+                        showFileReceiveFailedNotification()
+                    }
+                }
+                return result
+            }
+        })
+
         localHttpServer?.start()
 
         initNetwork()
@@ -251,7 +334,7 @@ class SyncForegroundService : Service() {
                 }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+                registerReceiver(receiver, filter, RECEIVER_EXPORTED)
             } else {
                 registerReceiver(receiver, filter)
             }
@@ -270,7 +353,7 @@ class SyncForegroundService : Service() {
      */
     fun acquireTransientWakeLock(timeoutMs: Long = 3000L) {
         try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            val powerManager = getSystemService(POWER_SERVICE) as? PowerManager ?: return
             val lock = powerManager.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "CrossClip::TransientSync"
@@ -284,10 +367,11 @@ class SyncForegroundService : Service() {
     }
 
     private fun loadPreferences() {
-        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         deviceId = sp.getString("device_id", "android_" + Build.MODEL.replace(" ", "_")) ?: "android"
         deviceName = sp.getString("device_name", Build.MODEL) ?: "安卓手机"
         autoSync = sp.getBoolean("auto_sync", true)
+        autoSearchEnabled = sp.getBoolean("auto_search_enabled", true)
         currentTargetDeviceId = sp.getString("last_device_id", "") ?: ""
         lastSavedPcIp = sp.getString("last_pc_ip", "") ?: ""
         currentHttpPort = sp.getInt("last_http_port", 18236)
@@ -333,6 +417,30 @@ class SyncForegroundService : Service() {
                     val statusText = if (connected) "已连接电脑 (${currentPcName})" else "搜索电脑中..."
                     updateNotification(statusText)
                 }
+            },
+            onFileEvent = { eventType, data ->
+                DebugLogger.log("SVC_NET", "SSE 收到文件事件: $eventType")
+                when (eventType) {
+                    "FILE_PROGRESS" -> {
+                        val fileId = data.optString("file_id", "")
+                        val received = data.optInt("received_chunks", 0)
+                        val total = data.optInt("total_chunks", 0)
+                        if (total > 0) {
+                            val progress = (received * 100) / total
+                            mainHandler.post {
+                                updateNotification("📤 发送文件中: $progress% ($received/$total 块)")
+                            }
+                        }
+                    }
+                    "FILE_RECEIVED" -> {
+                        val fileId = data.optString("file_id", "")
+                        val path = data.optString("path", "")
+                        DebugLogger.log("SVC_NET", "文件已保存到电脑: $path")
+                        mainHandler.post {
+                            updateNotification("✅ 文件已发送到电脑")
+                        }
+                    }
+                }
             }
         )
 
@@ -357,7 +465,38 @@ class SyncForegroundService : Service() {
             DebugLogger.log("DISCOVERY", "UDP/并发探测发现设备: id=$devId, name=$name, ip=$ip, port=$httpPort")
             onDeviceDiscovered(devId, name, ip, httpPort)
         }
-        lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp)
+        // 应用持久化的自动搜索开关：关闭时只做有限轮次扫描，不进入持续搜索
+        // （此时尚未 startDiscovery，socket 未创建，该调用是安全的初始化写入）
+        lanDiscovery.setAutoSearchEnabled(autoSearchEnabled)
+        lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp, manualScan = !autoSearchEnabled)
+    }
+
+    /** 查询自动搜索开关状态（供 UI 显示） */
+    fun isAutoSearchEnabled(): Boolean = autoSearchEnabled
+
+    /**
+     * 设置自动搜索开关。
+     *
+     * - 开启：重置搜索时间窗并立即开始搜索；
+     * - 关闭：立即中断当前搜索循环，之后仅能通过「重新扫描」手动查找。
+     * 状态会持久化到 SharedPreferences，服务重启后依然生效。
+     */
+    fun setAutoSearchEnabled(enabled: Boolean) {
+        autoSearchEnabled = enabled
+        getSharedPreferences("cross_clip_config", MODE_PRIVATE)
+            .edit()
+            .putBoolean("auto_search_enabled", enabled)
+            .apply()
+        DebugLogger.log("SVC_ACTION", "自动搜索开关变更为: ${if (enabled) "开启" else "关闭"}")
+
+        if (enabled) {
+            // 重新开启：重置时间窗并立即搜索
+            triggerRescan()
+            mainHandler.post { updateNotification("已开启自动搜索电脑") }
+        } else {
+            lanDiscovery.setAutoSearchEnabled(false)
+            mainHandler.post { updateNotification("已关闭自动搜索，点击「重新扫描」可手动查找") }
+        }
     }
 
     fun getDiscoveredDeviceList(): List<DiscoveredDevice> {
@@ -407,7 +546,8 @@ class SyncForegroundService : Service() {
             lanDiscovery.stopDiscovery()
         } catch (_: Exception) {}
         nsdHelper.startDiscovery()
-        lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp)
+        // 手动触发的扫描：即使自动搜索开关处于关闭状态，也要执行有限轮次的搜索
+        lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp, manualScan = !autoSearchEnabled)
     }
 
     /**
@@ -426,7 +566,7 @@ class SyncForegroundService : Service() {
         pinCode = ""
         discoveredDevices.clear()
 
-        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         sp.edit()
             .remove("last_pc_ip")
             .remove("last_device_id")
@@ -472,7 +612,7 @@ class SyncForegroundService : Service() {
                             currentPcIp = ip
                             currentHttpPort = httpPort
                             currentPcName = devName ?: name
-                            val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+                            val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
                             sp.edit().putString("last_pc_ip", ip).apply()
                             val sseUrl = "http://$ip:$httpPort/events?pin=$pinCode"
                             sseClient.connect(sseUrl)
@@ -486,7 +626,7 @@ class SyncForegroundService : Service() {
 
         // 2. 若未连接，检查是否为记忆中的目标电脑，若是则自动触发后台静默握手
         var shouldTriggerConnect = false
-        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         val devPin = sp.getString("pin_code_$finalDevId", "") ?: ""
         val candidatePin = if (devPin.isNotEmpty()) devPin else pinCode
 
@@ -554,7 +694,7 @@ class SyncForegroundService : Service() {
         currentHttpPort = device.httpPort
         currentPcName = device.name
 
-        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         val devPin = sp.getString("pin_code_${device.deviceId}", "") ?: ""
         if (devPin.isNotEmpty()) {
             pinCode = devPin
@@ -591,7 +731,7 @@ class SyncForegroundService : Service() {
         connectionState = -1 // 验证中
         DebugLogger.log("SVC_ACTION", "发起 PIN 码配对连接 (token=$token): $ip:$httpPort")
 
-        val sp = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+        val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         val editor = sp.edit()
             .putString("last_pc_ip", ip)
             .putString("pin_code", pin)
@@ -614,7 +754,7 @@ class SyncForegroundService : Service() {
                     currentPcName = devName ?: "Windows 电脑"
                     if (!retDevId.isNullOrEmpty()) {
                         currentTargetDeviceId = retDevId
-                        val prefs = getSharedPreferences("cross_clip_config", Context.MODE_PRIVATE)
+                        val prefs = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
                         prefs.edit()
                             .putString("last_device_id", retDevId)
                             .putString("pin_code_$retDevId", pin)
@@ -793,6 +933,107 @@ class SyncForegroundService : Service() {
         DebugLogger.log("SVC_MODE", "设置自检写入屏蔽状态: $enabled")
     }
 
+    /**
+     * 获取当前设备 ID（供文件传输等外部模块使用）
+     */
+    fun getLocalDeviceId(): String = deviceId
+
+    /**
+     * 显示文件「正在接收」通知（不定进度，带文件名与大小）
+     */
+    private fun showFileReceiveNotification(filename: String, fileSize: Long) {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            val sizeStr = formatFileSize(fileSize)
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
+                .setContentTitle("📥 正在接收文件")
+                .setContentText("$filename ($sizeStr)")
+                .setSmallIcon(android.R.drawable.ic_menu_save)
+                .setProgress(100, 0, true)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+            nm.notify(NOTIFICATION_ID_FILE, notification)
+        } catch (e: Exception) {
+            DebugLogger.log("SVC_NOTIFY", "显示文件接收通知失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 更新文件「接收进度」通知（确定性进度条）
+     */
+    private fun showFileReceiveProgressNotification(progress: Int) {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
+                .setContentTitle("📥 正在接收文件")
+                .setContentText("进度: $progress%")
+                .setSmallIcon(android.R.drawable.ic_menu_save)
+                .setProgress(100, progress, false)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+            nm.notify(NOTIFICATION_ID_FILE, notification)
+        } catch (e: Exception) {
+            DebugLogger.log("SVC_NOTIFY", "更新文件接收进度通知失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 显示文件接收完成通知。
+     * @param savedPath 实际落盘路径（默认目录为绝对路径，自定义目录为「目录名/文件名」）
+     */
+    private fun showFileReceiveCompleteNotification(savedPath: String) {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
+                .setContentTitle("✅ 文件接收完成")
+                .setContentText("已保存到: $savedPath")
+                .setStyle(NotificationCompat.BigTextStyle().bigText("已保存到: $savedPath"))
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setAutoCancel(true)
+                .setOngoing(false)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+            nm.notify(NOTIFICATION_ID_FILE, notification)
+        } catch (e: Exception) {
+            DebugLogger.log("SVC_NOTIFY", "显示文件接收完成通知失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 显示文件接收失败通知（哈希校验失败 / 落盘失败 / 数据不完整）
+     */
+    private fun showFileReceiveFailedNotification() {
+        try {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
+                .setContentTitle("❌ 文件接收失败")
+                .setContentText("传输中断或校验未通过，请重新发送")
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setAutoCancel(true)
+                .setOngoing(false)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+            nm.notify(NOTIFICATION_ID_FILE, notification)
+        } catch (e: Exception) {
+            DebugLogger.log("SVC_NOTIFY", "显示文件接收失败通知失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 格式化文件大小
+     */
+    private fun formatFileSize(bytes: Long): String {
+        return when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+            bytes < 1024 * 1024 * 1024 -> "${bytes / (1024 * 1024)} MB"
+            else -> "${bytes / (1024 * 1024 * 1024)} GB"
+        }
+    }
+
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NotificationManager::class.java)
@@ -815,6 +1056,19 @@ class SyncForegroundService : Service() {
                 lockscreenVisibility = Notification.VISIBILITY_SECRET
             }
             nm?.createNotificationChannel(channel)
+
+            // 文件传输渠道：用 IMPORTANCE_LOW（而非 MIN）才能让用户在通知栏看到进度条
+            val fileChannel = NotificationChannel(
+                CHANNEL_ID_FILE,
+                "CrossClip 文件传输",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "显示文件收发的实时进度与结果"
+                setShowBadge(false)
+                enableLights(false)
+                enableVibration(false)
+            }
+            nm?.createNotificationChannel(fileChannel)
         }
     }
 
@@ -852,7 +1106,7 @@ class SyncForegroundService : Service() {
     }
 
     private fun updateNotification(status: String) {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(NOTIFICATION_ID, buildNotification(status))
     }
 
@@ -882,7 +1136,7 @@ class SyncForegroundService : Service() {
                 restartIntent,
                 PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
-            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
             alarmManager.set(
                 AlarmManager.RTC_WAKEUP,
                 System.currentTimeMillis() + 1000,
