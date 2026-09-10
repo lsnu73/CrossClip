@@ -25,3 +25,8 @@ config.json
 # OS noise
 .DS_Store
 Thumbs.db
+
+# IDE / local tooling state (never commit)
+.idea/
+.reasonix/
+.xcodemap/
