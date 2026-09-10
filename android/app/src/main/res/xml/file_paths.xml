@@ -2,4 +2,8 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <external-files-path name="external_files" path="." />
     <files-path name="internal_files" path="." />
+    <!-- 暴露默认保存目录 Download/CrossClip，供「点击路径打开目录」功能使用 -->
+    <external-path name="external_downloads" path="Download/CrossClip/" />
+    <!-- 暴露 App 私有缓存目录，供文件接收的临时中转文件使用 -->
+    <cache-path name="cache_files" path="." />
 </paths>
