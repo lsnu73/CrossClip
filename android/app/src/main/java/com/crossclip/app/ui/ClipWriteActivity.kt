@@ -14,7 +14,7 @@ class ClipWriteActivity : Activity() {
         val text = intent?.getStringExtra("EXTRA_TEXT") ?: ""
         if (text.isNotEmpty()) {
             try {
-                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
                 val clipData = ClipData.newPlainText("CrossClip", text)
                 cm.setPrimaryClip(clipData)
                 Log.i("CrossClipWriter", "通过前台隐形窗口成功写入剪贴板 (长度: ${text.length})")

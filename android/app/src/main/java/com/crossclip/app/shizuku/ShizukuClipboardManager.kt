@@ -538,7 +538,7 @@ object ShizukuClipboardManager {
         try {
             val listenerBinder = object : Binder() {
                 override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
-                    if (code == IBinder.FIRST_CALL_TRANSACTION) {
+                    if (code == FIRST_CALL_TRANSACTION) {
                         data.enforceInterface(LISTENER_DESCRIPTOR)
                         Log.i(TAG, "收到 Shizuku 底层剪贴板变更 Binder 回调")
                         onChangeListener?.invoke()
@@ -789,7 +789,7 @@ object ShizukuClipboardManager {
                     }
                 }
 
-                param == Int::class.javaPrimitiveType || param == java.lang.Integer::class.java -> {
+                param == Int::class.javaPrimitiveType || param == Integer::class.java -> {
                     intIndex++
                     if (intIndex == 1) {
                         listOf(myUserId, 0)
@@ -818,7 +818,7 @@ object ShizukuClipboardManager {
                 param == java.lang.Byte::class.javaPrimitiveType || param == java.lang.Byte::class.java ->
                     listOf(0.toByte())
 
-                param == java.lang.Character::class.javaPrimitiveType || param == java.lang.Character::class.java ->
+                param == Character::class.javaPrimitiveType || param == Character::class.java ->
                     listOf('\u0000')
 
                 param.isInterface -> {
