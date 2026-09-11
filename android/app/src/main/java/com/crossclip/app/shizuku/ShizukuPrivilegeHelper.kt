@@ -14,6 +14,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 object ShizukuPrivilegeHelper {
 
     private const val TAG = "ShizukuPrivilege"
+
+    /**
+     * Shell (UID 2000) 守护唤醒脉冲的间隔（秒）。
+     *
+     * 该脉冲的唯一职责是「把可能被 ROM 冷冻的后台进程解冻得到执行机会」：进程活跃时剪贴板
+     * 同步由 Shizuku 底层监听与原生 PrimaryClipChangedListener 实时触发，与脉冲周期无关；
+     * 仅当进程真被冻结时，同步粒度才等于该周期。10 秒是省电与实时性的折中
+     * （原先 5 秒的解冻广播叠加心跳上报，待机功耗偏高）。
+     */
+    private const val PULSE_INTERVAL_SEC = 10
+
     private val executor = Executors.newSingleThreadExecutor()
     private val hasApplied = AtomicBoolean(false)
     private val pulseStarted = AtomicBoolean(false)
@@ -129,9 +140,9 @@ object ShizukuPrivilegeHelper {
                     "am broadcast -a com.crossclip.app.WAKEUP -p $pkg -f 0x10000020 --receiver-foreground >/dev/null 2>&1; " +
                     "(pidof $pkg >/dev/null 2>&1 || pgrep -f $pkg >/dev/null 2>&1) || " +
                     "am start-foreground-service -n $pkg/com.crossclip.app.service.SyncForegroundService -f 0x10000020 >/dev/null 2>&1; " +
-                    "sleep 5; done' >/dev/null 2>&1 &"
+                    "sleep $PULSE_INTERVAL_SEC; done' >/dev/null 2>&1 &"
                 val res = runShellCommandWithDetails(loopCmd)
-                DebugLogger.log("SHIZUKU_DAEMON", "已启动 Shell (UID 2000) 前台高优先解冻守护 (间隔 5s): code=${res.exitCode}")
+                DebugLogger.log("SHIZUKU_DAEMON", "已启动 Shell (UID 2000) 前台高优先解冻守护 (间隔 ${PULSE_INTERVAL_SEC}s): code=${res.exitCode}")
             } catch (e: Exception) {
                 DebugLogger.log("SHIZUKU_DAEMON", "启动 Shell 常驻唤醒守护异常: ${e.message}")
             }

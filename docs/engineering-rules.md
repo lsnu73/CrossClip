@@ -8,6 +8,13 @@
 - 移动端在网络配对成功后主动发起出站长连接(SSE/WebSocket),不依赖电脑端入站连接,规避国产系统待机时对入站 TCP 握手的节流与丢包;
 - 权限引导只引导真实依赖的核心权限(自启动),避免无关关联启动提示。
 
+## Android 省电与心跳/保活频率约定
+
+- 心跳上报统一走 `SyncForegroundService.sendHeartbeatThrottled()`:定时心跳线程(30s)、Shell(UID 2000) 唤醒脉冲、亮屏事件共用这一个入口,靠 `HEARTBEAT_MIN_GAP_MS`(25s) 去重,避免同一时刻多路重复发 HTTP;进程被 ROM 冻结时定时线程停摆,脉冲解冻后会立即补发一次(此时距上次上报已超过节流窗口);
+- 电脑端在线判定余量:`rust_desktop/src/server.rs` 中 peers 超时为 600s,心跳周期 ≤30s 即有余量;手机端感知电脑掉线靠 SSE 断开(秒级)与局域网探测,**不要**用提高心跳频率来解决;
+- Shell 唤醒脉冲周期 `ShizukuPrivilegeHelper.PULSE_INTERVAL_SEC`(当前 10s) 只决定「进程被冷冻时的最坏同步延迟」,进程活跃时同步由原生/Shizuku 监听实时触发,调整该值需同步评估待机功耗;
+- Shizuku 剪贴板轮询仅在底层 Binder 监听注册失败时启用(息屏自动暂停),监听就绪时不得再叠加高频轮询。
+
 ## Windows 托盘程序生命周期
 
 - 托盘消息窗口必须使用**顶层隐藏窗口**(父句柄为 `NULL`),不能使用 `HWND_MESSAGE`,否则无法接收系统关机广播;

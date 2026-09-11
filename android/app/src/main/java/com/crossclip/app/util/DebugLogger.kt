@@ -155,6 +155,51 @@ object DebugLogger {
         }
     }
 
+    /**
+     * 用其他应用打开日志所在目录。
+     *
+     * 关键点：日志目录（`Android/data/<包名>/files`）恰好是 file_paths.xml 中
+     * `external-files-path` 的根目录本身，而 FileProvider 对「根目录本身」调用
+     * getUriForFile 会执行 `path.substring(rootPath.length() + 1)` 越界，抛
+     * StringIndexOutOfBoundsException（客户端曾报 length=56; index=57）。
+     * 因此这里改用专门暴露其父级目录的 `external_data_root` 条目，
+     * 让日志目录成为根路径下的子路径后再生成 URI。
+     *
+     * @return 是否成功把目录交给系统「用其他应用打开」选择器
+     */
+    fun openLogDirectory(context: Context): Boolean {
+        val dir = getPrimaryLogFile()?.parentFile
+        if (dir == null || !dir.exists()) {
+            android.widget.Toast.makeText(context, "日志目录尚未生成", android.widget.Toast.LENGTH_SHORT).show()
+            return false
+        }
+        return try {
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dir)
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "resource/folder")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            // 交给系统「用其他应用打开」选择器，由用户自行挑选文件管理器或任意可处理该目录的应用
+            val chooser = Intent.createChooser(viewIntent, "用其他应用打开").apply {
+                // 从 Application/Service 上下文启动时需要 NEW_TASK
+                if (context !is android.app.Activity) {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            }
+            context.startActivity(chooser)
+            log("LOG_DIR", "已用「其他应用打开」调起日志目录: ${dir.absolutePath}")
+            true
+        } catch (e: Exception) {
+            log("LOG_DIR", "用其他应用打开日志目录失败: ${e.javaClass.simpleName}: ${e.message}")
+            android.widget.Toast.makeText(
+                context,
+                "没有可打开该目录的应用\n路径: ${dir.absolutePath}",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+            false
+        }
+    }
+
     fun setupCrashHandler() {
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->

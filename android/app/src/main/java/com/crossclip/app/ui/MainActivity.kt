@@ -22,7 +22,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.core.content.FileProvider
 import com.crossclip.app.R
 import com.crossclip.app.BuildConfig
 import com.crossclip.app.service.SyncForegroundService
@@ -51,7 +50,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var switchAutoSync: SwitchCompat
     private lateinit var btnLockTaskGuide: Button
     private lateinit var switchHideRecents: SwitchCompat
-    private lateinit var btnSilenceNotification: Button
 
     // 自动搜索开关（省电）
     private lateinit var switchAutoSearch: SwitchCompat
@@ -196,7 +194,6 @@ class MainActivity : AppCompatActivity() {
         switchAutoSync = findViewById(R.id.switch_auto_sync)
         btnLockTaskGuide = findViewById(R.id.btn_lock_task_guide)
         switchHideRecents = findViewById(R.id.switch_hide_recents)
-        btnSilenceNotification = findViewById(R.id.btn_silence_notification)
 
         // 自动搜索 / 通知权限 / 保存目录 相关控件
         switchAutoSearch = findViewById(R.id.switch_auto_search)
@@ -225,10 +222,10 @@ class MainActivity : AppCompatActivity() {
         btnExportLogs = findViewById(R.id.btn_export_logs)
         btnClearLogs = findViewById(R.id.btn_clear_logs)
 
-        tvLogFilePath.text = "日志路径（点击打开目录）: ${DebugLogger.getLogFilePath()}"
-        // p2: 点击日志路径文本 → 调起系统文件管理器打开日志所在目录
+        tvLogFilePath.text = "日志路径（点击用其他应用打开所在目录）: ${DebugLogger.getLogFilePath()}"
+        // 点击路径 → 用其他应用打开日志所在目录（已删除「复制日志路径」逻辑）
         tvLogFilePath.setOnClickListener {
-            openLogDirectory()
+            openLogDirWithOtherApps()
         }
 
         btnViewLogs.setOnClickListener {
@@ -350,33 +347,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        btnSilenceNotification.setOnClickListener {
-            SyncForegroundService.instance?.hideForegroundNotification()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                try {
-                    val intent = Intent(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
-                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
-                        putExtra(android.provider.Settings.EXTRA_CHANNEL_ID, SyncForegroundService.CHANNEL_ID)
-                    }
-                    startActivity(intent)
-                    Toast.makeText(this, "已隐藏通知！在系统页面将【允许通知】关闭即可彻底无痕", Toast.LENGTH_LONG).show()
-                } catch (_: Exception) {
-                    val appIntent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                        putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, packageName)
-                    }
-                    startActivity(appIntent)
-                }
-            } else {
-                Toast.makeText(this, "已隐藏通知中心常驻通知", Toast.LENGTH_SHORT).show()
-            }
-        }
-
         // ---------- 自动搜索开关（省电策略） ----------
         switchAutoSearch.setOnCheckedChangeListener { _, isChecked ->
             // 初始化回填状态时不应触发真实切换（否则会重启搜索并弹出 Toast）
             if (isInitializingUi) return@setOnCheckedChangeListener
             SyncForegroundService.instance?.setAutoSearchEnabled(isChecked)
             refreshAutoSearchUI(isChecked)
+            // 立即刷新主页状态文案，避免开关已关闭但文案仍显示「搜索中」造成困惑
+            refreshStatusFromService()
             Toast.makeText(
                 this,
                 if (isChecked) "已开启自动搜索电脑" else "已关闭自动搜索，可点击「重新扫描」手动查找",
@@ -404,10 +382,8 @@ class MainActivity : AppCompatActivity() {
         }
 
         tvSaveDirPath.setOnClickListener {
-            // 点击路径文本本身 → 调起文件管理器打开该目录
-            if (!SaveDirManager.openDir(this)) {
-                Toast.makeText(this, "未能打开文件管理器，请手动前往该目录", Toast.LENGTH_LONG).show()
-            }
+            // 用其他应用打开：交给系统选择器，由用户挑选文件管理器或任意可处理目录的应用
+            openSaveDirWithOtherApps()
         }
 
         tvResetSaveDir.setOnClickListener {
@@ -629,41 +605,26 @@ class MainActivity : AppCompatActivity() {
         tvResetSaveDir.visibility = if (SaveDirManager.hasCustomDir(this)) View.VISIBLE else View.GONE
     }
 
-    // ==================== 日志目录 ====================
+    // ==================== 路径点击：用其他应用打开 ====================
 
     /**
-     * 打开日志所在目录。
-     * 日志位于 App 私有外部目录，用 FileProvider 暴露后以 folder MIME 交给文件管理器打开；
-     * 若系统没有支持该 MIME 的文件管理器，则降级为 Toast 展示真实路径。
+     * 点击日志路径：用其他应用打开日志所在目录。
+     *
+     * 日志固定写在 App 私有外部目录（`Android/data/<包名>/files/`），而 FileProvider 中
+     * `external-files-path` 的根恰好就是该目录本身（对其直接调用 getUriForFile 会越界抛
+     * StringIndexOutOfBoundsException: length=56; index=57），因此 DebugLogger 内部改用
+     * 父级 root 生成目录 URI，再交给系统「用其他应用打开」选择器。
      */
-    private fun openLogDirectory() {
-        val file = DebugLogger.getPrimaryLogFile()
-        val dir = file?.parentFile
-        if (dir == null || !dir.exists()) {
-            Toast.makeText(this, "日志目录尚未生成", Toast.LENGTH_SHORT).show()
-            return
+    private fun openLogDirWithOtherApps() {
+        if (!DebugLogger.openLogDirectory(this)) {
+            Toast.makeText(this, "没有可打开日志目录的应用，可点「导出」分享日志文件", Toast.LENGTH_LONG).show()
         }
-        try {
-            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", dir)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "resource/folder")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            if (intent.resolveActivity(packageManager) != null) {
-                startActivity(intent)
-            } else {
-                Toast.makeText(
-                    this,
-                    "未找到可打开目录的文件管理器\n路径: ${dir.absolutePath}",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        } catch (e: Exception) {
-            Toast.makeText(
-                this,
-                "打开日志目录失败: ${e.message}\n路径: ${dir.absolutePath}",
-                Toast.LENGTH_LONG
-            ).show()
+    }
+
+    /** 点击保存目录路径：用其他应用打开当前保存目录 */
+    private fun openSaveDirWithOtherApps() {
+        if (!SaveDirManager.openDir(this)) {
+            Toast.makeText(this, "没有可打开该目录的应用，请手动前往该目录", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -730,95 +691,119 @@ class MainActivity : AppCompatActivity() {
         handler.post(object : Runnable {
             override fun run() {
                 if (isDestroyedActivity) return
-                val service = SyncForegroundService.instance
-                if (service != null) {
-                    val pcName = if (service.currentPcName.isNotEmpty() && service.currentPcName != "未连接") {
-                        service.currentPcName
-                    } else {
-                        "Windows 电脑"
-                    }
-
-                    val deviceList = service.getDiscoveredDeviceList()
-                    val devCount = deviceList.size
-
-                    // 优先从实时探测列表中提取当前目标电脑，杜绝展示未连通的旧死 IP
-                    val liveTarget = deviceList.firstOrNull { it.deviceId == service.currentTargetDeviceId }
-                        ?: deviceList.firstOrNull { service.currentPcIp.isNotEmpty() && it.ip == service.currentPcIp }
-                    val activeIp = if (service.connectionState == 1) {
-                        service.currentPcIp
-                    } else {
-                        liveTarget?.ip ?: ""
-                    }
-                    val activeName = if (service.connectionState == 1) {
-                        pcName
-                    } else {
-                        liveTarget?.name ?: pcName
-                    }
-
-                    if (activeIp.isNotEmpty() && (service.connectionState == 1 || liveTarget != null)) {
-                        if (devCount > 1) {
-                            tvDiscoveredDevice.text = "🟢 局域网已发现 ($devCount 台): $activeName ($activeIp)"
-                            btnSwitchDevice.visibility = View.VISIBLE
-                            btnSwitchDevice.text = "切换 ($devCount)"
-                        } else {
-                            tvDiscoveredDevice.text = "🟢 局域网已发现: $activeName ($activeIp)"
-                            btnSwitchDevice.visibility = View.VISIBLE
-                            btnSwitchDevice.text = "选择"
-                        }
-                        tvDiscoveredDevice.setTextColor(Color.parseColor("#10B981"))
-                    } else {
-                        if (devCount > 0) {
-                            tvDiscoveredDevice.text = "🟢 局域网发现其他电脑 ($devCount 台)"
-                            tvDiscoveredDevice.setTextColor(Color.parseColor("#10B981"))
-                            btnSwitchDevice.visibility = View.VISIBLE
-                            btnSwitchDevice.text = "选择 ($devCount)"
-                        } else {
-                            tvDiscoveredDevice.text = "🔍 正在局域网全网段搜索电脑..."
-                            tvDiscoveredDevice.setTextColor(Color.parseColor("#64748B"))
-                            btnSwitchDevice.visibility = View.GONE
-                        }
-                    }
-
-                    when (service.connectionState) {
-                        1 -> {
-                            tvStatus.text = "● 已连接至 $pcName (${service.currentPcIp})"
-                            tvStatus.setTextColor(Color.parseColor("#10B981"))
-                            btnConnectPc.text = "断开连接"
-                            btnConnectPc.isEnabled = true
-                            etPinCode.isEnabled = false
-                        }
-                        2 -> {
-                            tvStatus.text = "● PIN 码不匹配 (电脑已换码，请输入新码重连)"
-                            tvStatus.setTextColor(Color.parseColor("#EF4444"))
-                            btnConnectPc.text = "一键连接"
-                            btnConnectPc.isEnabled = true
-                            etPinCode.isEnabled = true
-                        }
-                        -1 -> {
-                            tvStatus.text = "● 正在验证密文挑战握手..."
-                            tvStatus.setTextColor(Color.parseColor("#F59E0B"))
-                            btnConnectPc.text = "配对中..."
-                            btnConnectPc.isEnabled = false
-                        }
-                        else -> {
-                            btnConnectPc.text = "一键连接"
-                            btnConnectPc.isEnabled = true
-                            etPinCode.isEnabled = true
-                            if (liveTarget != null) {
-                                tvStatus.text = "● 已发现目标电脑，请输入 6 位 PIN 码连接"
-                                tvStatus.setTextColor(Color.parseColor("#0284C7"))
-                            } else {
-                                tvStatus.text = "● 电脑离线中，局域网搜索中..."
-                                tvStatus.setTextColor(Color.parseColor("#64748B"))
-                            }
-                        }
-                    }
-                }
-                btnBatteryPerm.text = "去设置"
-                updateShizukuUI()
+                refreshStatusFromService()
                 handler.postDelayed(this, 1500)
             }
         })
+    }
+
+    /** 依据后台服务的实时状态刷新主页文案（状态轮询与自动搜索开关切换共用） */
+    private fun refreshStatusFromService() {
+        val service = SyncForegroundService.instance
+        if (service != null) {
+            val pcName = if (service.currentPcName.isNotEmpty() && service.currentPcName != "未连接") {
+                service.currentPcName
+            } else {
+                "Windows 电脑"
+            }
+
+            val deviceList = service.getDiscoveredDeviceList()
+            val devCount = deviceList.size
+
+            // 自动搜索开关 / 扫描线程状态：用于区分「搜索中 / 已关闭 / 已暂停」，避免文案误导
+            val autoSearchOn = service.isAutoSearchEnabled()
+            val lanSearching = service.isLanSearching()
+
+            // 优先从实时探测列表中提取当前目标电脑，杜绝展示未连通的旧死 IP
+            val liveTarget = deviceList.firstOrNull { it.deviceId == service.currentTargetDeviceId }
+                ?: deviceList.firstOrNull { service.currentPcIp.isNotEmpty() && it.ip == service.currentPcIp }
+            val activeIp = if (service.connectionState == 1) {
+                service.currentPcIp
+            } else {
+                liveTarget?.ip ?: ""
+            }
+            val activeName = if (service.connectionState == 1) {
+                pcName
+            } else {
+                liveTarget?.name ?: pcName
+            }
+
+            if (activeIp.isNotEmpty() && (service.connectionState == 1 || liveTarget != null)) {
+                if (devCount > 1) {
+                    tvDiscoveredDevice.text = "🟢 局域网已发现 ($devCount 台): $activeName ($activeIp)"
+                    btnSwitchDevice.visibility = View.VISIBLE
+                    btnSwitchDevice.text = "切换 ($devCount)"
+                } else {
+                    tvDiscoveredDevice.text = "🟢 局域网已发现: $activeName ($activeIp)"
+                    btnSwitchDevice.visibility = View.VISIBLE
+                    btnSwitchDevice.text = "选择"
+                }
+                tvDiscoveredDevice.setTextColor(Color.parseColor("#10B981"))
+            } else {
+                if (devCount > 0) {
+                    tvDiscoveredDevice.text = "🟢 局域网发现其他电脑 ($devCount 台)"
+                    tvDiscoveredDevice.setTextColor(Color.parseColor("#10B981"))
+                    btnSwitchDevice.visibility = View.VISIBLE
+                    btnSwitchDevice.text = "选择 ($devCount)"
+                } else {
+                    tvDiscoveredDevice.text = when {
+                        !autoSearchOn -> "🔍 自动搜索已关闭，点「重新扫描」查找电脑"
+                        !lanSearching -> "🔍 搜索已暂停，点「重新扫描」继续查找"
+                        else -> "🔍 正在局域网全网段搜索电脑..."
+                    }
+                    tvDiscoveredDevice.setTextColor(Color.parseColor("#64748B"))
+                    btnSwitchDevice.visibility = View.GONE
+                }
+            }
+
+            when (service.connectionState) {
+                1 -> {
+                    tvStatus.text = "● 已连接至 $pcName (${service.currentPcIp})"
+                    tvStatus.setTextColor(Color.parseColor("#10B981"))
+                    btnConnectPc.text = "断开连接"
+                    btnConnectPc.isEnabled = true
+                    etPinCode.isEnabled = false
+                }
+                2 -> {
+                    tvStatus.text = "● PIN 码不匹配 (电脑已换码，请输入新码重连)"
+                    tvStatus.setTextColor(Color.parseColor("#EF4444"))
+                    btnConnectPc.text = "一键连接"
+                    btnConnectPc.isEnabled = true
+                    etPinCode.isEnabled = true
+                }
+                -1 -> {
+                    tvStatus.text = "● 正在验证密文挑战握手..."
+                    tvStatus.setTextColor(Color.parseColor("#F59E0B"))
+                    btnConnectPc.text = "配对中..."
+                    btnConnectPc.isEnabled = false
+                }
+                else -> {
+                    btnConnectPc.text = "一键连接"
+                    btnConnectPc.isEnabled = true
+                    etPinCode.isEnabled = true
+                    when {
+                        liveTarget != null -> {
+                            tvStatus.text = "● 已发现目标电脑，请输入 6 位 PIN 码连接"
+                            tvStatus.setTextColor(Color.parseColor("#0284C7"))
+                        }
+                        !autoSearchOn -> {
+                            tvStatus.text = "● 电脑离线，自动搜索已关闭（可点「重新扫描」查找）"
+                            tvStatus.setTextColor(Color.parseColor("#64748B"))
+                        }
+                        !lanSearching -> {
+                            tvStatus.text = "● 电脑离线，搜索已暂停（可点「重新扫描」继续）"
+                            tvStatus.setTextColor(Color.parseColor("#64748B"))
+                        }
+                        else -> {
+                            tvStatus.text = "● 电脑离线中，局域网搜索中..."
+                            tvStatus.setTextColor(Color.parseColor("#64748B"))
+                        }
+                    }
+                }
+            }
+        }
+        btnBatteryPerm.text = "去设置"
+        updateShizukuUI()
     }
 
     private fun promptMiuiKeepAliveIfNeeded() {

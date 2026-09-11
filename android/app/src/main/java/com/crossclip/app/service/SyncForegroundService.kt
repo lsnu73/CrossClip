@@ -67,6 +67,22 @@ class SyncForegroundService : Service() {
         const val ACTION_WATCHDOG = "com.crossclip.app.ACTION_WATCHDOG"
         private const val WATCHDOG_INTERVAL_MS = 2 * 60 * 1000L
 
+        /**
+         * 心跳上报周期（秒）。
+         * 电脑端要 10 分钟（rust_desktop/src/server.rs 中 peers 超时 600s）才判定手机离线，
+         * 30 秒一次余量充足；手机端感知电脑掉线主要靠 SSE 断开（秒级）与局域网探测，
+         * 因此把原先的 15 秒降到 30 秒，功耗减半且不影响断线感知速度。
+         */
+        private const val HEARTBEAT_INTERVAL_SEC = 30L
+
+        /**
+         * 心跳最小间隔（毫秒）。
+         * 定时心跳线程与 Shell(UID 2000) 唤醒脉冲共用 [sendHeartbeatThrottled] 这一个入口，
+         * 用它去重，避免同一时刻两路各发一次 HTTP 上报；同时保证进程被解冻后能及时补发
+         * （只要距上次上报超过该窗口就立即发出）。
+         */
+        private const val HEARTBEAT_MIN_GAP_MS = 25_000L
+
         @Volatile
         var instance: SyncForegroundService? = null
             private set
@@ -122,6 +138,10 @@ class SyncForegroundService : Service() {
     private var lastHeartbeatNotify = 0L
     private var lastSyncEvent = "等待剪贴板变化"
 
+    /** 最近一次真正发出心跳上报的时间戳：定时线程与唤醒脉冲共用，用于统一节流去重 */
+    @Volatile
+    private var lastHeartbeatSentAt = 0L
+
     /** 最近一次上报的接收进度百分比，用于通知节流（-1 表示尚未开始） */
     @Volatile
     private var lastFileReceiveProgress = -1
@@ -155,7 +175,8 @@ class SyncForegroundService : Service() {
 
         loadPreferences()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("正在自动搜索局域网电脑..."))
+        // 通知栏初始文案同样走统一的状态文案来源，保证与「自动搜索电脑」开关状态一致
+        startForeground(NOTIFICATION_ID, buildNotification(statusTextForNotification()))
         registerScreenStateReceiver()
         startHeartbeat()
 
@@ -244,13 +265,57 @@ class SyncForegroundService : Service() {
         initNetwork()
     }
 
+    /** 心跳通知：定期把「状态 + 心跳数 + 最近同步事件」写回通知栏（状态文案来自统一来源） */
     private fun maybeUpdateHeartbeatNotification() {
         val now = System.currentTimeMillis()
         if (now - lastHeartbeatNotify < 15000) return
         lastHeartbeatNotify = now
-        updateNotification("后台守护运行中 · 心跳 $heartbeatCount · $lastSyncEvent")
+        updateNotification("${statusTextForNotification()} · 心跳 $heartbeatCount · $lastSyncEvent")
     }
 
+    /**
+     * 统一的心跳上报入口（带最小间隔节流）。
+     *
+     * 定时心跳线程与 Shell(UID 2000) 唤醒脉冲都调用这里：
+     *  - 正常情况：每 [HEARTBEAT_INTERVAL_SEC] 秒上报一次即可，多余的调用会被节流直接丢弃；
+     *  - 进程被 ROM 冻结后：定时线程随之停摆，脉冲解冻进程时会立刻补发一次
+     *    （此时距上次上报已超过节流窗口），电脑端不会把手机误判为离线。
+     */
+    private fun sendHeartbeatThrottled() {
+        if (currentPcIp.isEmpty() || pinCode.isEmpty()) return
+        val now = System.currentTimeMillis()
+        if (now - lastHeartbeatSentAt < HEARTBEAT_MIN_GAP_MS) return
+        lastHeartbeatSentAt = now
+        HttpUploader.sendHeartbeat(currentPcIp, currentHttpPort, pinCode, deviceId, deviceName, 18237) { ok ->
+            if (ok && connectionState == 1) {
+                val ts = System.currentTimeMillis()
+                val devId = if (currentTargetDeviceId.isNotEmpty()) currentTargetDeviceId else "pc_${currentPcIp.replace('.', '_')}"
+                val dev = discoveredDevices[devId]
+                if (dev != null) {
+                    dev.lastSeen = ts
+                } else {
+                    discoveredDevices[devId] = DiscoveredDevice(devId, currentPcName, currentPcIp, currentHttpPort, ts)
+                }
+            } else if (!ok && connectionState == 1) {
+                DebugLogger.log("HEARTBEAT", "心跳上报失败，电脑端已离线，重启 5/15 分钟搜索计时")
+                connectionState = 0
+                lanDiscovery.isConnected = false
+                currentPcIp = ""
+                currentPcName = "未连接"
+                // 掉线统一处理：重置搜索时间窗（必要时重启扫描）并刷新通知栏文案
+                mainHandler.post { onPcDisconnected() }
+            }
+        }
+    }
+
+    /**
+     * 后台守护心跳线程。
+     *
+     * 周期为 [HEARTBEAT_INTERVAL_SEC] 秒（原为 15 秒）：它只承担「让电脑端知道手机在线」
+     * 与「兜底发现电脑端假死」，而电脑端要 10 分钟才判定手机离线（见 rust_desktop
+     * server.rs 的 peers 超时 600s），手机端感知电脑掉线又主要靠 SSE 断开（秒级），
+     * 因此降到 30 秒既省电也不影响断线感知速度。
+     */
     private fun startHeartbeat() {
         heartbeatExecutor?.shutdownNow()
         val executor = Executors.newSingleThreadScheduledExecutor { r ->
@@ -260,33 +325,12 @@ class SyncForegroundService : Service() {
         executor.scheduleWithFixedDelay({
             heartbeatCount++
             DebugLogger.log("HEARTBEAT", "后台守护心跳计数: $heartbeatCount (已连接=$connectionState, PC=$currentPcIp)")
-            if (currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
-                HttpUploader.sendHeartbeat(currentPcIp, currentHttpPort, pinCode, deviceId, deviceName, 18237) { ok ->
-                    if (ok && connectionState == 1) {
-                        val now = System.currentTimeMillis()
-                        val devId = if (currentTargetDeviceId.isNotEmpty()) currentTargetDeviceId else "pc_${currentPcIp.replace('.', '_')}"
-                        val dev = discoveredDevices[devId]
-                        if (dev != null) {
-                            dev.lastSeen = now
-                        } else {
-                            discoveredDevices[devId] = DiscoveredDevice(devId, currentPcName, currentPcIp, currentHttpPort, now)
-                        }
-                    } else if (!ok && connectionState == 1) {
-                        DebugLogger.log("HEARTBEAT", "心跳上报失败，电脑端已离线，清空当前连接并切换为搜索中")
-                        connectionState = 0
-                        lanDiscovery.isConnected = false
-                        currentPcIp = ""
-                        currentPcName = "未连接"
-                        mainHandler.post {
-                            updateNotification("正在重新搜索局域网电脑...")
-                        }
-                    }
-                }
-            }
+            // 统一入口自带节流：与唤醒脉冲 / 亮屏事件不会重复上报
+            sendHeartbeatThrottled()
             mainHandler.post {
                 maybeUpdateHeartbeatNotification()
             }
-        }, 15, 15, TimeUnit.SECONDS)
+        }, HEARTBEAT_INTERVAL_SEC, HEARTBEAT_INTERVAL_SEC, TimeUnit.SECONDS)
     }
 
     private val workerExecutor = Executors.newSingleThreadExecutor { r ->
@@ -310,9 +354,9 @@ class SyncForegroundService : Service() {
                         if (action == "com.crossclip.app.WAKEUP") {
                             DebugLogger.log("WAKEUP_PULSE", "收到 Shell (UID 2000) 守护心跳唤醒脉冲")
                             onLocalClipboardChanged()
-                            if (currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
-                                HttpUploader.sendHeartbeat(currentPcIp, currentHttpPort, pinCode, deviceId, deviceName, 18237)
-                            }
+                            // 心跳统一走节流入口：脉冲只负责「解冻进程 + 兜底读剪贴板」，
+                            // 不必每次（10 秒）都发一次 HTTP 上报
+                            sendHeartbeatThrottled()
                             return@execute
                         }
 
@@ -326,9 +370,8 @@ class SyncForegroundService : Service() {
                         if (action == Intent.ACTION_SCREEN_ON || action == Intent.ACTION_USER_PRESENT) {
                             ShizukuClipboardManager.resumePollingForScreenOn()
                             onLocalClipboardChanged()
-                            if (currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
-                                HttpUploader.sendHeartbeat(currentPcIp, currentHttpPort, pinCode, deviceId, deviceName, 18237)
-                            }
+                            // 亮屏同样走节流入口，连续亮灭屏时不会高频重复上报
+                            sendHeartbeatThrottled()
                         }
                     }
                 }
@@ -407,15 +450,21 @@ class SyncForegroundService : Service() {
                 if (connected) {
                     connectionState = 1
                     lanDiscovery.isConnected = true
+                    mainHandler.post { updateNotification(statusTextForNotification()) }
                 } else {
-                    if (connectionState == 1) {
+                    // 只有「已连接 → 断开」这一次跳变才算真正掉线：
+                    // SSE 重连失败会反复回调 false，若每次都重置搜索时间窗，省电策略就失效了
+                    val wasConnected = connectionState == 1
+                    if (wasConnected) {
                         connectionState = 0
                     }
                     lanDiscovery.isConnected = false
-                }
-                mainHandler.post {
-                    val statusText = if (connected) "已连接电脑 (${currentPcName})" else "搜索电脑中..."
-                    updateNotification(statusText)
+                    if (wasConnected) {
+                        // 掉线统一处理：重新计时 5/15 分钟并（必要时）重启扫描
+                        onPcDisconnected()
+                    } else {
+                        mainHandler.post { updateNotification(statusTextForNotification()) }
+                    }
                 }
             },
             onFileEvent = { eventType, data ->
@@ -453,8 +502,11 @@ class SyncForegroundService : Service() {
             },
             onDeviceLost = { name ->
                 DebugLogger.log("DISCOVERY", "mDNS 设备丢失: name=$name")
-                if (currentPcName == name) {
+                if (currentPcName == name && connectionState == 1) {
                     connectionState = 0
+                    lanDiscovery.isConnected = false
+                    // 与 SSE / 心跳掉线保持一致：重置 5/15 分钟搜索时间窗并刷新通知栏文案
+                    onPcDisconnected()
                 }
             }
         )
@@ -474,6 +526,53 @@ class SyncForegroundService : Service() {
     /** 查询自动搜索开关状态（供 UI 显示） */
     fun isAutoSearchEnabled(): Boolean = autoSearchEnabled
 
+    /** 局域网扫描线程是否仍在运行（开关开启时也可能因 15 分钟超时自动停止） */
+    fun isLanSearching(): Boolean = try {
+        lanDiscovery.isSearching
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * 通知栏状态文案的**唯一来源**。
+     *
+     * 通知栏与 App 页面必须表达同一件事：此前通知栏在电脑掉线后固定显示「搜索电脑中...」，
+     * 而「自动搜索关闭」或「搜索已超时停止」时页面已改口，导致两处提示互相矛盾。
+     * 这里按「已连接 / 配对中 / 自动搜索已关闭 / 搜索已暂停 / 搜索中」分级生成文案。
+     */
+    private fun statusTextForNotification(): String {
+        // lanDiscovery 在 initNetwork() 中才初始化，启动早期的 startForeground 需要兜底
+        val searching = if (this::lanDiscovery.isInitialized) lanDiscovery.isSearching else true
+        return when {
+            connectionState == 1 -> "✅ 已连接电脑 ($currentPcName)"
+            connectionState == -1 -> "⏳ 正在配对连接电脑..."
+            !autoSearchEnabled -> "⏸ 自动搜索已关闭，点开应用「重新扫描」手动查找"
+            !searching -> "⏸ 搜索已暂停，点开应用「重新扫描」继续查找"
+            else -> "🔍 搜索电脑中..."
+        }
+    }
+
+    /**
+     * 电脑端掉线后的统一处理。
+     *
+     * 1. 自动搜索开启时，重置「5 分钟降频 / 15 分钟停止」时间窗，让省电策略从**掉线时刻**
+     *    重新计时（否则连接期间流逝的时间会让断线瞬间就被判定超时、扫描线程立即停止）；
+     * 2. 若扫描线程已停止（例如上一轮已超时退出），重新拉起局域网自动搜索；
+     * 3. 刷新通知栏文案，使其与自动搜索开关状态、页面文案保持一致。
+     */
+    private fun onPcDisconnected() {
+        if (autoSearchEnabled) {
+            lanDiscovery.restartAutoSearchWindow()
+            if (!lanDiscovery.isSearching) {
+                DebugLogger.log("DISCOVERY", "电脑端掉线且扫描线程已停止，重新拉起局域网自动搜索")
+                // 先彻底释放旧 socket / MulticastLock，避免旧 socket 仍占用 UDP 端口
+                lanDiscovery.stopDiscovery()
+                lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp, manualScan = false)
+            }
+        }
+        mainHandler.post { updateNotification(statusTextForNotification()) }
+    }
+
     /**
      * 设置自动搜索开关。
      *
@@ -492,11 +591,11 @@ class SyncForegroundService : Service() {
         if (enabled) {
             // 重新开启：重置时间窗并立即搜索
             triggerRescan()
-            mainHandler.post { updateNotification("已开启自动搜索电脑") }
         } else {
             lanDiscovery.setAutoSearchEnabled(false)
-            mainHandler.post { updateNotification("已关闭自动搜索，点击「重新扫描」可手动查找") }
         }
+        // 开关切换后统一刷新通知栏，确保「通知栏 = 开关状态 = 页面文案」三者一致
+        mainHandler.post { updateNotification(statusTextForNotification()) }
     }
 
     fun getDiscoveredDeviceList(): List<DiscoveredDevice> {
@@ -572,8 +671,9 @@ class SyncForegroundService : Service() {
             .remove("last_device_id")
             .remove("pin_code")
             .apply()
-        updateNotification("已清除历史配置，重新搜索局域网电脑...")
         triggerRescan()
+        // 通知栏文案统一走状态来源：清空历史并重新扫描后即为「搜索电脑中...」
+        updateNotification(statusTextForNotification())
     }
 
     private fun onDeviceDiscovered(devId: String, name: String, ip: String, httpPort: Int) {
@@ -616,7 +716,8 @@ class SyncForegroundService : Service() {
                             sp.edit().putString("last_pc_ip", ip).apply()
                             val sseUrl = "http://$ip:$httpPort/events?pin=$pinCode"
                             sseClient.connect(sseUrl)
-                            updateNotification("已连接电脑 ($currentPcName)")
+                            // 通知栏文案统一走状态来源
+                            updateNotification(statusTextForNotification())
                         }
                     }
                 }
@@ -665,7 +766,8 @@ class SyncForegroundService : Service() {
                             .putString("pin_code_$boundId", candidatePin)
                         editor.apply()
 
-                        updateNotification("已连接电脑 ($currentPcName)")
+                        // 通知栏文案统一走状态来源
+                        updateNotification(statusTextForNotification())
                         val sseUrl = "http://$ip:$httpPort/events?pin=$candidatePin"
                         sseClient.connect(sseUrl)
                     } else if (statusCode == 403) {
@@ -706,7 +808,8 @@ class SyncForegroundService : Service() {
             .putInt("last_http_port", device.httpPort)
             .apply()
 
-        updateNotification("已切换到目标电脑: ${device.name}")
+        // 切换目标后通知栏文案统一切换成当前真实状态（未连接时即为「搜索电脑中...」）
+        updateNotification(statusTextForNotification())
     }
 
     fun disconnectCurrentPc() {
@@ -715,7 +818,8 @@ class SyncForegroundService : Service() {
         sseClient.disconnect()
         connectionState = 0
         lanDiscovery.isConnected = false
-        updateNotification("已断开连接")
+        // 手动断开同样按「掉线」处理：重置 5/15 分钟搜索时间窗并刷新通知栏文案
+        onPcDisconnected()
     }
 
     fun connectWithPin(
@@ -760,7 +864,8 @@ class SyncForegroundService : Service() {
                             .putString("pin_code_$retDevId", pin)
                             .apply()
                     }
-                    updateNotification("已连接电脑 ($currentPcName)")
+                    // 通知栏文案统一走状态来源
+                    updateNotification(statusTextForNotification())
                     val sseUrl = "http://$ip:$httpPort/events?pin=$pin"
                     sseClient.connect(sseUrl)
                     callback(true, 200, currentPcName)
@@ -1069,20 +1174,6 @@ class SyncForegroundService : Service() {
                 enableVibration(false)
             }
             nm?.createNotificationChannel(fileChannel)
-        }
-    }
-
-    fun hideForegroundNotification() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
-            DebugLogger.log("SVC_NOTIFY", "已隐藏通知中心常驻通知")
-        } catch (e: Exception) {
-            DebugLogger.log("SVC_NOTIFY", "隐藏常驻通知异常: ${e.message}")
         }
     }
 

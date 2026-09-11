@@ -1,5 +1,6 @@
 package com.crossclip.app.util
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -7,7 +8,6 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
-import androidx.core.content.FileProvider
 import java.io.File
 
 /**
@@ -35,6 +35,9 @@ object SaveDirManager {
 
     /** 无扩展名时创建 SAF 文档使用的兜底 MIME */
     private const val FALLBACK_MIME = "application/octet-stream"
+
+    /** 外部存储 SAF 文档提供者（DocumentsUI / 文件管理器据此解析 `primary:Download/...` 文档 ID） */
+    private const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
 
     // ==================== 目录配置读写 ====================
 
@@ -198,77 +201,69 @@ object SaveDirManager {
         return displayPath
     }
 
-    // ==================== 打开目录（调起系统文件管理器） ====================
+    // ==================== 用其他应用打开目录 ====================
 
     /**
-     * 调起系统文件管理器打开当前保存目录。
+     * 构造可打开当前保存目录的候选 Intent，顺序为「自定义目录 → 精确默认目录 → 兜底下载目录」。
      *
-     * 由于 Android 至今没有「打开任意目录」的官方标准 Intent，这里采用多级降级策略：
-     *  1. 自定义目录 → 直接用 SAF 的目录 URI + `vnd.android.document/directory` 打开；
-     *  2. 默认目录   → 用 FileProvider 暴露 `Download/CrossClip`，以 `resource/folder` 打开；
-     *  3. 再降级     → 打开系统「下载」根目录（大多数 ROM 的 DocumentsUI 均支持）；
-     *  4. 全部失败   → 返回 false，由调用方 Toast 提示。
+     * 注意：Android 没有「打开任意目录」的官方标准 Intent，且 FileProvider 无法为它自己配置的
+     * 根目录生成 URI（对根目录本身调用 getUriForFile 会抛 StringIndexOutOfBoundsException），
+     * 因此这里统一使用外部存储 SAF 文档 URI + `vnd.android.document/directory`。
+     */
+    private fun buildDirIntents(context: Context): List<Intent> {
+        val intents = mutableListOf<Intent>()
+        // 优先：用户授权过的自定义目录（SAF tree URI）
+        getCustomDirUri(context)?.let { uri ->
+            intents += Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+        }
+        // 默认目录：Download/CrossClip
+        intents += externalStorageDirIntent("primary:Download/$DEFAULT_SUBDIR")
+        // 兜底：下载根目录（个别 ROM 不支持直接定位到子目录）
+        intents += externalStorageDirIntent("primary:Download")
+        return intents
+    }
+
+    /** 构造「外部存储 provider 文档 URI + 目录 MIME」的打开意图 */
+    private fun externalStorageDirIntent(documentId: String): Intent =
+        Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(
+                DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, documentId),
+                DocumentsContract.Document.MIME_TYPE_DIR
+            )
+        }
+
+    /**
+     * 用其他应用打开当前保存目录。
      *
-     * @return 是否成功调起了某个文件管理器
+     * 统一走系统「用其他应用打开」选择器：不再自建候选列表（此前那种方式往往只能列出系统自带
+     * 那个简陋的文件管理器，体验反而更差），让用户在系统对话框里挑选任意可处理目录的应用。
+     * 逐个尝试候选意图，任一能调起选择器即视为成功。
+     *
+     * @return 是否成功调起了「用其他应用打开」选择器
      */
     fun openDir(context: Context): Boolean {
-        // ---- 策略 1：自定义目录，直接交给 SAF DocumentsUI ----
-        val customUri = getCustomDirUri(context)
-        if (customUri != null) {
+        for (intent in buildDirIntents(context)) {
             try {
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(customUri, DocumentsContract.Document.MIME_TYPE_DIR)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                val target = Intent(intent)
+                if (context !is Activity) {
+                    // 从 Application/Service 上下文启动时需要 NEW_TASK
+                    target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                if (intent.resolveActivity(context.packageManager) != null) {
-                    context.startActivity(intent)
-                    return true
+                val chooser = Intent.createChooser(target, "用其他应用打开")
+                if (context !is Activity) {
+                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
+                context.startActivity(chooser)
+                DebugLogger.log(TAG, "已用「其他应用打开」调起保存目录: ${getDisplayPath(context)}")
+                return true
             } catch (e: Exception) {
-                Log.w(TAG, "SAF 方式打开自定义目录失败: ${e.message}")
+                Log.w(TAG, "用其他应用打开目录失败: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
-
-        // ---- 策略 2：默认目录，用 FileProvider 暴露后以 folder MIME 打开 ----
-        try {
-            val dir = getDefaultDir()
-            if (!dir.exists()) dir.mkdirs()
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                dir
-            )
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "resource/folder")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            if (intent.resolveActivity(context.packageManager) != null) {
-                context.startActivity(intent)
-                return true
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "FileProvider 方式打开默认目录失败: ${e.message}")
-        }
-
-        // ---- 策略 3：兜底打开系统「下载」目录（DocumentsUI 内部根节点） ----
-        try {
-            val downloadsUri = Uri.parse("content://com.android.externalstorage.documents/root/primary")
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(
-                    DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:Download"),
-                    DocumentsContract.Document.MIME_TYPE_DIR
-                )
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            if (intent.resolveActivity(context.packageManager) != null) {
-                context.startActivity(intent)
-                return true
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "兜底打开下载目录失败: ${e.message}")
-        }
-
-        DebugLogger.log(TAG, "所有打开目录的策略均失败（系统可能未安装文件管理器）")
+        DebugLogger.log(TAG, "没有可打开保存目录的应用（候选目录均无法调起）")
         return false
     }
 

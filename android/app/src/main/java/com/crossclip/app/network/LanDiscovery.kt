@@ -22,8 +22,11 @@ class LanDiscovery(
 ) {
     private val TAG = "CrossClipDiscovery"
 
+    /** 搜索线程是否仍在运行（供 UI 区分「正在搜索 / 已停止搜索」；对外只读） */
     @Volatile
-    private var isSearching = false
+    var isSearching = false
+        private set
+
     @Volatile
     var isConnected = false
 
@@ -162,6 +165,18 @@ class LanDiscovery(
             socket = null
             releaseMulticastLock()
         }
+    }
+
+    /**
+     * 重置「5 分钟降频 / 15 分钟停止」的自动搜索时间窗。
+     *
+     * 电脑端掉线时由服务调用。若不重置，连接期间流逝的时间会让断线瞬间就被判定为
+     * 「已超时」，扫描线程立刻停止（页面显示「搜索已暂停」），与设计意图
+     * ——断线后继续高频搜 5 分钟、再低频搜 10 分钟才停——不符。
+     */
+    fun restartAutoSearchWindow() {
+        searchWindowStartMs = System.currentTimeMillis()
+        DebugLogger.log(TAG, "已重置自动搜索时间窗（断线后重新计时：5 分钟降频 / 15 分钟停止）")
     }
 
     fun startDiscovery(

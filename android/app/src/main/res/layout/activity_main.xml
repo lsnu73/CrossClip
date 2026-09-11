@@ -467,55 +467,6 @@
                     android:layout_marginTop="10dp"
                     android:layout_marginBottom="10dp" />
 
-                <!-- 通知栏静默指引入口 -->
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
-
-                    <LinearLayout
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:orientation="vertical">
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="常驻通知静默与隐藏"
-                            android:textSize="14sp"
-                            android:textStyle="bold"
-                            android:textColor="@color/text_primary" />
-
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="通知级别已降为极小。可直达系统关闭展示，不降保活"
-                            android:textSize="12sp"
-                            android:textColor="@color/text_secondary" />
-                    </LinearLayout>
-
-                    <Button
-                        android:id="@+id/btn_silence_notification"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:minHeight="38dp"
-                        android:minWidth="76dp"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp"
-                        android:text="去关闭"
-                        android:textSize="12sp"
-                        android:textAllCaps="false" />
-                </LinearLayout>
-
-                <View
-                    android:layout_width="match_parent"
-                    android:layout_height="1dp"
-                    android:background="#F1F5F9"
-                    android:layout_marginTop="10dp"
-                    android:layout_marginBottom="10dp" />
-
                 <!-- 文件保存目录：展示当前路径 + 「更改」按钮；点击路径本身可打开该目录 -->
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -551,7 +502,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="1dp"
-                            android:text="点击路径可打开该目录"
+                            android:text="点击路径可用其他应用打开该目录"
                             android:textSize="11sp"
                             android:textColor="@color/text_muted" />
                     </LinearLayout>
