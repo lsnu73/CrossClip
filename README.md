@@ -2,6 +2,11 @@
 
 > 本仓库基于 [zxzc114514/CrossClip](https://github.com/zxzc114514/CrossClip) Fork 并新增了多项功能增强，详见下方"本 Fork 新增功能"。原始仓库保留了完整的剪贴板同步基础架构与协议设计，特此致谢。
 
+> [!IMPORTANT]
+> **开发者 / AI 接手必读：[`docs/ai-handover.md`](docs/ai-handover.md)**
+> 该文档记录了本项目的整体设计意图、每个「反直觉写法」背后的系统限制、改动禁区与历史踩坑清单。
+> 直接上手改代码前请先通读，可避免破坏保活链、协议一致性等难以复现的问题。
+
 CrossClip 是一套**纯局域网、点对点**的剪贴板双向同步 & 文件互传工具：Windows 电脑与 Android 手机连接同一 Wi-Fi/局域网后，文本、代码、链接可在两端**秒级无感互传**，还支持**双向文件传输**。全程无需公网服务器，数据不出局域网。
 
 正式安装包可从 [Releases](https://github.com/zxzc114514/CrossClip/releases) 下载，也可按下方说明自行构建。
@@ -70,6 +75,7 @@ CrossClip/
 │       │   └── util/{DebugLogger,SaveDirManager,PermissionHelper}.kt
 │       └── res/…
 └── docs/
+    ├── ai-handover.md         # ★ AI 开发交接契约（接手开发前必读）
     ├── protocol.md            # 局域网协议与加密细节
     └── engineering-rules.md   # 双端工程约束规范
 ```

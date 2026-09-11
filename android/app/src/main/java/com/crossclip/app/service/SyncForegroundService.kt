@@ -39,6 +39,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
+/**
+ * CrossClip 前台守护服务 —— 手机端核心枢纽。
+ *
+ * 职责: 配对与连接状态机、SSE 出站长连接调度、剪贴板监听与转发、
+ * 心跳节流上报、文件收发的通知与落盘、保活相关的广播接收。
+ *
+ * 接手开发前请先阅读 `docs/ai-handover.md`(AI 开发交接契约),
+ * 重点关注 §3.1(出站长连接)、§3.7(心跳节流)、§6.5(资源释放约定)。
+ */
 class SyncForegroundService : Service() {
 
     private val TAG = "CrossClipService"

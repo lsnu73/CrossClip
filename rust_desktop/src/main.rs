@@ -1,5 +1,11 @@
 #![windows_subsystem = "windows"]
 
+//! CrossClip Windows 端主程序。
+//!
+//! 接手开发前请先阅读 `docs/ai-handover.md`(AI 开发交接契约), 其中记录了
+//! 托盘窗口生命周期、单实例 + WM_COPYDATA 转发、资源管理器右键菜单注册
+//! 等设计背后的原因与改动禁区。
+
 mod clipboard;
 mod config;
 mod crypto;
