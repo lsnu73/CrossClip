@@ -12,8 +12,15 @@
     <share-target
         android:targetClass="com.crossclip.app.receiver.ShareReceiveActivity"
         android:targetPackage="com.crossclip.app">
-        <!-- */* 覆盖图片/视频/任意文件，与 intent-filter 的 mimeType 保持一致 -->
+        <!-- */* 覆盖一切；但个别 ROM(实测 vivo OriginOS)的匹配器不认裸 */*，
+             需要显式大类型才能命中，两者并存兼容各实现 -->
         <data android:mimeType="*/*" />
+        <data android:mimeType="image/*" />
+        <data android:mimeType="video/*" />
+        <data android:mimeType="audio/*" />
+        <data android:mimeType="text/*" />
+        <data android:mimeType="application/*" />
+        <data android:mimeType="multipart/*" />
         <category android:name="com.crossclip.app.category.SEND_TO_PC" />
     </share-target>
 </shortcuts>
