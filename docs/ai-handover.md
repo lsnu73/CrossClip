@@ -425,7 +425,7 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 | `network/LanDiscovery.kt` | UDP 广播、子网并发探测、**自动搜索降频状态机** | 耗电表现 |
 | `network/NsdHelper.kt` | mDNS 发现 + HTTP 探活过滤幽灵缓存 | 发现成功率 |
 | `crypto/CryptoUtil.kt` | 与 Rust `crypto.rs` **逐字节对称** | 改一端必须改另一端 |
-| `receiver/ShareReceiveActivity.kt` | 系统分享面板入口(SEND / SEND_MULTIPLE); 通知图标复用 `NOTIFICATION_SMALL_ICON` | `AndroidManifest.xml` 的 intent-filter |
+| `receiver/ShareReceiveActivity.kt` | 系统分享面板入口(SEND / SEND_MULTIPLE); **「直接分享」/长按拖拽浮层目标**(`res/xml/shortcuts.xml` 的 share-target + `CrossClipApp` 发布的同 category 动态快捷方式, 两者缺一不可); 通知图标复用 `NOTIFICATION_SMALL_ICON` | `AndroidManifest.xml` 的 intent-filter 与 shortcuts meta-data |
 | `receiver/ProcessTextActivity.kt` | 文本选择菜单「发送至电脑」 | 同上 |
 | `ui/ClipWriteActivity.kt` | 透明 Activity, 抢焦点写剪贴板(降级链第 3 层) | 降级链 |
 | `ui/OpenSaveDirActivity.kt` | 无界面跳板: 「文件接收完成」通知点击后打开保存目录, 随即 `finish()` | 打开目录必须由 Activity 上下文发起 |

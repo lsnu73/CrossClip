@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  分享目标声明（Android 10+ 「直接分享」/ 拖拽浮层）。
+
+  系统分享面板下半部分的「App 完整列表」靠 ShareReceiveActivity 的
+  ACTION_SEND intent-filter 就能出现；但**长按文件拖拽时弹出的浮层**
+  (HyperOS/ColorOS 等的「灵动岛」式面板) 列出的是「直接分享」目标，
+  它来自本文件声明的 share-target 与应用运行时发布的同名 category
+  分享快捷方式(见 CrossClipApp.publishShareShortcut)。两者缺一不可。
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target
+        android:targetClass="com.crossclip.app.receiver.ShareReceiveActivity"
+        android:targetPackage="com.crossclip.app">
+        <!-- */* 覆盖图片/视频/任意文件，与 intent-filter 的 mimeType 保持一致 -->
+        <data android:mimeType="*/*" />
+        <category android:name="com.crossclip.app.category.SEND_TO_PC" />
+    </share-target>
+</shortcuts>
