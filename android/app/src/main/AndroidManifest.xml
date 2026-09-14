@@ -140,12 +140,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
-
-            <!-- 注册「直接分享」目标：长按文件拖拽弹出的系统浮层
-                 (「发送到…」应用列表) 依据此声明 + 运行时发布的分享快捷方式列出 CrossClip -->
-            <meta-data
-                android:name="android.app.shortcuts"
-                android:resource="@xml/shortcuts" />
         </activity>
 
     </application>

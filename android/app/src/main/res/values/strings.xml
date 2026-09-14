@@ -9,7 +9,5 @@
     <string name="btn_save_config">保存配置并重启服务</string>
     <string name="btn_test_send">手动发送当前剪贴板到电脑</string>
     <string name="tile_label">发送剪贴板</string>
-    <string name="share_shortcut_label">发送到电脑</string>
-    <string name="share_shortcut_long_label">把文件发送到电脑</string>
     <string name="process_text_label">发送至电脑</string>
 </resources>
