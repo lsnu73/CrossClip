@@ -309,11 +309,11 @@ fn write_http_request(
     Ok(())
 }
 
-/// 读取并完整消费一个 HTTP 响应，返回响应体文本。
+/// 读取并完整消费一个 HTTP 响应，返回 (状态码, 响应体文本)。
 ///
 /// 必须把响应体读干净，否则残留字节会与下一个请求的响应「串包」，
 /// 这是 keep-alive 复用连接时最容易踩的坑。
-fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<String, String> {
+fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<(u16, String), String> {
     // 1. 状态行
     let mut status_line = String::new();
     reader
@@ -322,6 +322,11 @@ fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<String, Strin
     if status_line.is_empty() {
         return Err("连接已被对端关闭".to_string());
     }
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok())
+        .unwrap_or(0);
 
     // 2. 响应头：找到 Content-Length
     let mut content_length = 0usize;
@@ -348,9 +353,9 @@ fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<String, Strin
         reader
             .read_exact(&mut body)
             .map_err(|e| format!("读取响应体失败: {}", e))?;
-        Ok(String::from_utf8_lossy(&body).to_string())
+        Ok((status_code, String::from_utf8_lossy(&body).to_string()))
     } else {
-        Ok(String::new())
+        Ok((status_code, String::new()))
     }
 }
 
@@ -422,7 +427,10 @@ pub fn send_file_to_phone(
         prepare_body.as_bytes(),
     )?;
 
-    let prepare_response = read_http_response(&mut reader)?;
+    let (prepare_status, prepare_response) = read_http_response(&mut reader)?;
+    if prepare_status != 200 {
+        return Err(format!("手机端拒绝接收文件 (HTTP {})", prepare_status));
+    }
     // 接收端已有同一文件：一个分块都不用发
     let skipped_existing = prepare_response.contains("\"already_exists\":true");
 
@@ -434,13 +442,25 @@ pub fn send_file_to_phone(
     } else {
         // ---------- 2. 逐块发送（复用同一连接） ----------
         for idx in 0..transfer.total_chunks {
-            let encrypted = file_manager.get_chunk_encrypted_bytes(&transfer.file_id, idx, pin)?;
+            let encrypted =
+                file_manager.get_chunk_encrypted_bytes(&transfer.file_id, idx, pin)?;
             let path = format!(
                 "/file/chunk?file_id={}&index={}&total={}",
                 transfer.file_id, idx, transfer.total_chunks
             );
             write_http_request(&mut writer, &host, &path, "application/octet-stream", &encrypted)?;
-            let _ = read_http_response(&mut reader)?;
+            let (chunk_status, chunk_body) = read_http_response(&mut reader)?;
+            // 手机端拒绝某个分块（如解密失败/磁盘写满）时绝不能装作没事继续发：
+            // 旧实现把响应整个丢掉，即使手机端一路 500 也照样报「发送完成」，
+            // 而接收端通知栏会永久停在「正在接收 100%」——失败必须显式上抛
+            if chunk_status != 200 {
+                return Err(format!(
+                    "手机端接收第 {} 块失败 (HTTP {}): {}",
+                    idx + 1,
+                    chunk_status,
+                    chunk_body
+                ));
+            }
             on_progress(idx + 1, transfer.total_chunks);
         }
     }
@@ -465,7 +485,13 @@ pub fn send_file_to_phone(
         "application/json; charset=utf-8",
         complete_body.as_bytes(),
     )?;
-    let _ = read_http_response(&mut reader)?;
+    let (complete_status, complete_response) = read_http_response(&mut reader)?;
+    if complete_status != 200 {
+        return Err(format!(
+            "手机端未能落盘该文件 (HTTP {}): {}",
+            complete_status, complete_response
+        ));
+    }
 
     Ok(if skipped_existing {
         SendOutcome::SkippedExisting

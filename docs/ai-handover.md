@@ -560,6 +560,7 @@ hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
 | 14 | 通知栏里显示的是「另一个图标」, 与应用图标无关 | 所有通知的 `setSmallIcon` 用的都是 Android 系统内置图标(`ic_menu_share` / `ic_menu_save` / `ic_dialog_*` / `ic_menu_upload`) | 统一走 `SyncForegroundService.NOTIFICATION_SMALL_ICON`(§3.14) |
 | 15 | 点「断开连接」后几秒又自己连上 | `disconnectCurrentPc()` 只断了 SSE 没停扫描线程; 扫描发现「记忆中的设备 + 内存里还有 PIN」即重新握手 | 断开即停 UDP/mDNS 搜索并置 `manualDisconnected` 抑制重连(§3.12) |
 | 16 | 手机端已断开, 电脑端托盘仍显示「已连接手机」 | Peer 表只在 600 秒无心跳后才修剪, SSE 连接结束也不摘除, 状态退化成「最近 10 分钟是否收到过心跳」 | 新增 `POST /disconnect` 即时摘除, SSE 长连接结束时也摘除(§3.13) |
+| 17 | 中等大小文件(实测 5/10/20/50MB)收完后通知栏卡在「正在接收 100%」, 而 1/2/100MB 反而正常 | 终态「完成」通知与进行中卡片共用同一通知 ID: 进行中卡片在同一 ID 上高频更新过若干次, 个别 ROM 的通知优化会合并/限流「同 ID 的快速连续更新」, 最后一条终态更新被系统吞掉; 触发与否取决于传输时长落在哪个窗口, 故呈现「个别大小必现」的假象 | 终态(完成/失败)通知改用**全新 ID** `NOTIFICATION_ID_FILE_SETTLED`(2003)发布, 并显式 `cancel` 进行中卡片 —— 新 ID 是「新通知」而非「第 N 次更新」, 从根上绕开同 ID 更新合并; 另桌面端补上 chunk/complete 响应状态码检查, 手机端拒绝时浮窗报「发送失败」而非假成功 |
 
 ---
 

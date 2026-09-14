@@ -74,6 +74,17 @@ class SyncForegroundService : Service() {
         const val NOTIFICATION_ID_FILE = 2002
 
         /**
+         * 「接收完成/失败」终态通知的专用 ID。
+         *
+         * 不复用 [NOTIFICATION_ID_FILE]（进行中卡片）是刻意的：进行中卡片在同一 ID 上
+         * 高频更新过若干次，而个别 ROM 的通知优化会对「同 ID 的快速连续更新」做合并/限流，
+         * 实测过最后的终态更新被吞掉、通知栏永久停在「正在接收文件 / 进度: 100%」。
+         * 终态改用全新 ID 发布（同时显式 cancel 进行中卡片），彻底绕开同 ID 更新合并，
+         * 让终态成为一条「新的通知」而不是「第 N 次更新」。
+         */
+        const val NOTIFICATION_ID_FILE_SETTLED = 2003
+
+        /**
          * 所有通知共用的**小图标**。
          *
          * 这里要的是「图案」，不是「图标」：Android 会把通知小图标当成 alpha 蒙版来渲染 ——
@@ -1246,6 +1257,9 @@ class SyncForegroundService : Service() {
         }
 
         try {
+            // 终态走全新通知 ID（见 NOTIFICATION_ID_FILE_SETTLED 的说明），并显式收掉
+            // 进行中卡片 —— 双保险：即使某 ROM 吞掉同 ID 的终态更新，新 ID 也一定是新通知
+            nm.cancel(NOTIFICATION_ID_FILE)
             val builder = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
                 .setContentTitle("✅ 文件接收完成")
                 .setContentText(
@@ -1267,8 +1281,8 @@ class SyncForegroundService : Service() {
                 builder.setContentIntent(openDirPendingIntent)
             }
 
-            DebugLogger.log("DIAG_NOTIFY", "nm.notify(COMPLETE) ID=$NOTIFICATION_ID_FILE ongoing=false thread=${Thread.currentThread().name}")
-            nm.notify(NOTIFICATION_ID_FILE, builder.build())
+            DebugLogger.log("DIAG_NOTIFY", "nm.notify(COMPLETE) ID=$NOTIFICATION_ID_FILE_SETTLED ongoing=false thread=${Thread.currentThread().name}")
+            nm.notify(NOTIFICATION_ID_FILE_SETTLED, builder.build())
             DebugLogger.log("DIAG_NOTIFY", "nm.notify(COMPLETE) 已返回")
             DebugLogger.log("SVC_NOTIFY", "已发出「文件接收完成」通知: $savedPath")
         } catch (e: Exception) {
@@ -1282,6 +1296,8 @@ class SyncForegroundService : Service() {
     private fun showFileReceiveFailedNotification() {
         try {
             val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            // 与完成通知同理：终态走全新 ID，并收掉进行中卡片
+            nm.cancel(NOTIFICATION_ID_FILE)
             val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
                 .setContentTitle("❌ 文件接收失败")
                 .setContentText("传输中断或校验未通过，请重新发送")
@@ -1290,7 +1306,7 @@ class SyncForegroundService : Service() {
                 .setOngoing(false)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
-            nm.notify(NOTIFICATION_ID_FILE, notification)
+            nm.notify(NOTIFICATION_ID_FILE_SETTLED, notification)
         } catch (e: Exception) {
             DebugLogger.log("SVC_NOTIFY", "显示文件接收失败通知失败: ${e.message}")
         }
