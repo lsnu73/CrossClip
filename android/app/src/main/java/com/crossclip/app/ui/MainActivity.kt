@@ -611,16 +611,16 @@ class MainActivity : AppCompatActivity() {
     // ==================== 路径点击：用其他应用打开 ====================
 
     /**
-     * 点击日志路径：用其他应用打开日志所在目录。
+     * 点击日志路径：用其他应用打开日志文件。
      *
-     * 日志固定写在 App 私有外部目录（`Android/data/<包名>/files/`），而 FileProvider 中
-     * `external-files-path` 的根恰好就是该目录本身（对其直接调用 getUriForFile 会越界抛
-     * StringIndexOutOfBoundsException: length=56; index=57），因此 DebugLogger 内部改用
-     * 父级 root 生成目录 URI，再交给系统「用其他应用打开」选择器。
+     * 日志固定写在 App 私有外部目录（`Android/data/<包名>/files/`）。Android 11+ 分区存储下
+     * 任何文件管理器都无权浏览其他应用的 `Android/data`，打开「目录」的选择器里必然只有
+     * 网盘/浏览器类噪音（连系统「文件」都不出现），因此 DebugLogger 内部改为经 FileProvider
+     * 以 `text/plain` 直接打开日志**文件**，交给文本查看器/编辑器展示。
      */
     private fun openLogDirWithOtherApps() {
         if (!DebugLogger.openLogDirectory(this)) {
-            Toast.makeText(this, "没有可打开日志目录的应用，可点「导出」分享日志文件", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "没有可打开日志文件的应用，可点「导出」分享日志文件", Toast.LENGTH_LONG).show()
         }
     }
 

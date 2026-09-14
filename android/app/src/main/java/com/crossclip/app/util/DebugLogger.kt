@@ -156,44 +156,51 @@ object DebugLogger {
     }
 
     /**
-     * 用其他应用打开日志所在目录。
+     * 用其他应用打开日志文件。
      *
-     * 关键点：日志目录（`Android/data/<包名>/files`）恰好是 file_paths.xml 中
-     * `external-files-path` 的根目录本身，而 FileProvider 对「根目录本身」调用
-     * getUriForFile 会执行 `path.substring(rootPath.length() + 1)` 越界，抛
-     * StringIndexOutOfBoundsException（客户端曾报 length=56; index=57）。
-     * 因此这里改用专门暴露其父级目录的 `external_data_root` 条目，
-     * 让日志目录成为根路径下的子路径后再生成 URI。
+     * #### 为什么打开「文件」而不是「所在目录」
+     * 日志位于 `Android/data/<包名>/files`，Android 11+ 分区存储下**任何**应用（包括各 OEM
+     * 自带文件管理器）都无权浏览其他应用的 `Android/data` 目录 —— 打开目录的选择器里只会
+     * 出现网盘/浏览器类噪音，连系统「文件」都不出现，这条路本身走不通。
+     * 改为经 FileProvider 以 `text/plain` 直接打开日志文件本体，文本查看器/编辑器都能接手；
+     * 应用对 `filesDir` 自有读权，FileProvider 授予临时读权后对端即可正常读取。
      *
-     * @return 是否成功把目录交给系统「用其他应用打开」选择器
+     * @return 是否成功调起选择器
      */
     fun openLogDirectory(context: Context): Boolean {
-        val dir = getPrimaryLogFile()?.parentFile
-        if (dir == null || !dir.exists()) {
-            android.widget.Toast.makeText(context, "日志目录尚未生成", android.widget.Toast.LENGTH_SHORT).show()
+        val file = getPrimaryLogFile()
+        if (file == null || !file.exists() || file.length() == 0L) {
+            android.widget.Toast.makeText(context, "暂无日志可查看", android.widget.Toast.LENGTH_SHORT).show()
             return false
         }
         return try {
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dir)
+            val authority = "${context.packageName}.fileprovider"
+            val uri: Uri = try {
+                FileProvider.getUriForFile(context, authority, file)
+            } catch (_: Exception) {
+                Uri.fromFile(file)
+            }
             val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "resource/folder")
+                setDataAndType(uri, "text/plain")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            // 交给系统「用其他应用打开」选择器，由用户自行挑选文件管理器或任意可处理该目录的应用
-            val chooser = Intent.createChooser(viewIntent, "用其他应用打开").apply {
-                // 从 Application/Service 上下文启动时需要 NEW_TASK
+            // 从 Application/Service 上下文启动时需要 NEW_TASK
+            if (context !is android.app.Activity) {
+                viewIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val chooser = Intent.createChooser(viewIntent, "用其他应用打开日志").apply {
                 if (context !is android.app.Activity) {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
             }
             context.startActivity(chooser)
-            log("LOG_DIR", "已用「其他应用打开」调起日志目录: ${dir.absolutePath}")
+            log("LOG_DIR", "已用「其他应用打开」调起日志文件: ${file.absolutePath}")
             true
         } catch (e: Exception) {
-            log("LOG_DIR", "用其他应用打开日志目录失败: ${e.javaClass.simpleName}: ${e.message}")
+            log("LOG_DIR", "用其他应用打开日志失败: ${e.javaClass.simpleName}: ${e.message}")
             android.widget.Toast.makeText(
                 context,
-                "没有可打开该目录的应用\n路径: ${dir.absolutePath}",
+                "没有可打开日志的应用\n路径: ${file.absolutePath}",
                 android.widget.Toast.LENGTH_LONG
             ).show()
             false

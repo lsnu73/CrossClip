@@ -1,6 +1,7 @@
 package com.crossclip.app.util
 
 import android.app.Activity
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -208,63 +209,123 @@ object SaveDirManager {
      *
      * 注意：Android 没有「打开任意目录」的官方标准 Intent，且 FileProvider 无法为它自己配置的
      * 根目录生成 URI（对根目录本身调用 getUriForFile 会抛 StringIndexOutOfBoundsException），
-     * 因此这里统一使用外部存储 SAF 文档 URI + `vnd.android.document/directory`。
+     * 因此这里统一使用外部存储 SAF 文档 URI。
+     *
+     * 目录 MIME 有两套互不覆盖的注册口径：系统 DocumentsUI 认 `vnd.android.document/directory`，
+     * 而大量 OEM/第三方文件管理器只注册了 `resource/folder`（实测 vivo 自带文件管理不在前者的
+     * 解析结果里）。每个目录都要生成两种 MIME 的候选，缺哪套哪类应用就不出现。
      */
     private fun buildDirIntents(context: Context): List<Intent> {
         val intents = mutableListOf<Intent>()
-        // 优先：用户授权过的自定义目录（SAF tree URI）
+        val dirMimes = arrayOf(
+            DocumentsContract.Document.MIME_TYPE_DIR, // vnd.android.document/directory
+            "resource/folder"
+        )
+        // 优先：用户授权过的自定义目录（SAF tree URI，只支持目录 MIME 这一种形态）
         getCustomDirUri(context)?.let { uri ->
             intents += Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         }
-        // 默认目录：Download/CrossClip
-        intents += externalStorageDirIntent("primary:Download/$DEFAULT_SUBDIR")
-        // 兜底：下载根目录（个别 ROM 不支持直接定位到子目录）
-        intents += externalStorageDirIntent("primary:Download")
+        // 默认目录：Download/CrossClip；兜底：下载根目录（个别 ROM 不支持直接定位到子目录）
+        for (documentId in arrayOf("primary:Download/$DEFAULT_SUBDIR", "primary:Download")) {
+            for (mime in dirMimes) {
+                intents += Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(
+                        DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, documentId),
+                        mime
+                    )
+                }
+            }
+        }
         return intents
     }
 
-    /** 构造「外部存储 provider 文档 URI + 目录 MIME」的打开意图 */
-    private fun externalStorageDirIntent(documentId: String): Intent =
-        Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(
-                DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, documentId),
-                DocumentsContract.Document.MIME_TYPE_DIR
-            )
-        }
+    /** OEM 文件管理器的包名/类名特征：命中者排在选择器首行，避免被网盘、浏览器类噪音淹没 */
+    private val FILE_MANAGER_HINTS = listOf(
+        "filemanager", "fileexplorer", "file_manager", "filebrowser",
+        "documentsui", "myfiles", "esfileexplorer", "filemaster"
+    )
 
     /**
      * 用其他应用打开当前保存目录。
      *
-     * 统一走系统「用其他应用打开」选择器：不再自建候选列表（此前那种方式往往只能列出系统自带
-     * 那个简陋的文件管理器，体验反而更差），让用户在系统对话框里挑选任意可处理目录的应用。
-     * 逐个尝试候选意图，任一能调起选择器即视为成功。
+     * 流程：按候选顺序找到**第一个有解析结果**的目录 Intent（保住「自定义目录优先」语义）→
+     * 收集它的全部处理应用 → 文件管理器类排在首行（`EXTRA_INITIAL_INTENTS`）→ 再交给系统
+     * 选择器展示全部候选。不直接 `startActivity` 某个应用，是因为无法可靠识别「哪个是用户
+     * 想用的文件管理器」，排序 + 系统选择器是兼容性与体验的平衡点。
      *
      * @return 是否成功调起了「用其他应用打开」选择器
      */
     fun openDir(context: Context): Boolean {
+        val pm = context.packageManager
+
+        // 按候选顺序取第一个「至少有一个应用能处理」的目录 Intent
+        var matchedIntent: Intent? = null
         for (intent in buildDirIntents(context)) {
-            try {
-                val target = Intent(intent)
-                if (context !is Activity) {
-                    // 从 Application/Service 上下文启动时需要 NEW_TASK
-                    target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                val chooser = Intent.createChooser(target, "用其他应用打开")
-                if (context !is Activity) {
-                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(chooser)
-                DebugLogger.log(TAG, "已用「其他应用打开」调起保存目录: ${getDisplayPath(context)}")
-                return true
+            val hasResolver = try {
+                pm.queryIntentActivities(intent, 0).isNotEmpty()
             } catch (e: Exception) {
-                Log.w(TAG, "用其他应用打开目录失败: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+            if (hasResolver) {
+                matchedIntent = intent
+                break
             }
         }
-        DebugLogger.log(TAG, "没有可打开保存目录的应用（候选目录均无法调起）")
-        return false
+        if (matchedIntent == null) {
+            DebugLogger.log(TAG, "没有可打开保存目录的应用（候选目录均无法调起）")
+            return false
+        }
+
+        // 收集该 Intent 的全部处理应用，文件管理器类排前面
+        data class Handler(val intent: Intent, val isFileManager: Boolean)
+        val seen = HashSet<String>()
+        val handlers = mutableListOf<Handler>()
+        try {
+            for (ri in pm.queryIntentActivities(matchedIntent, 0)) {
+                val pkg = ri.activityInfo.packageName
+                val cls = ri.activityInfo.name
+                if (!seen.add("$pkg/$cls")) continue
+                val lowered = "${pkg.lowercase()}/${cls.lowercase()}"
+                val isFileManager = FILE_MANAGER_HINTS.any { lowered.contains(it) }
+                handlers += Handler(
+                    Intent(matchedIntent).setComponent(ComponentName(pkg, cls)),
+                    isFileManager
+                )
+            }
+        } catch (e: Exception) {
+            DebugLogger.log(TAG, "解析目录处理应用失败(退回系统选择器): ${e.message}")
+        }
+        if (handlers.isEmpty()) {
+            DebugLogger.log(TAG, "没有可打开保存目录的应用（无解析结果）")
+            return false
+        }
+        handlers.sortByDescending { it.isFileManager }
+
+        val base = handlers.first().intent
+        if (context !is Activity) {
+            base.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val chooser = Intent.createChooser(base, "用其他应用打开")
+        if (handlers.size > 1) {
+            // 其余应用（含全部文件管理器）按排好的顺序放在选择器首行之后
+            chooser.putExtra(
+                Intent.EXTRA_INITIAL_INTENTS,
+                handlers.drop(1).map { it.intent }.toTypedArray()
+            )
+        }
+        if (context !is Activity) {
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(chooser)
+        DebugLogger.log(
+            TAG,
+            "已调起「其他应用打开」选择器: ${getDisplayPath(context)}, " +
+                "候选 ${handlers.size} 个(文件管理器优先)"
+        )
+        return true
     }
 
     // ==================== 内部工具函数 ====================
