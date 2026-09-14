@@ -4,11 +4,13 @@ import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
+import androidx.appcompat.app.AlertDialog
 import java.io.File
 
 /**
@@ -30,6 +32,7 @@ object SaveDirManager {
     private const val PREF_NAME = "cross_clip_config"
     private const val KEY_CUSTOM_DIR_URI = "custom_save_dir_uri"
     private const val KEY_CUSTOM_DIR_LABEL = "custom_save_dir_label"
+    private const val KEY_PREF_DIR_OPENER = "preferred_dir_opener"
 
     /** 默认模式下的子目录名（位于系统下载目录内） */
     private const val DEFAULT_SUBDIR = "CrossClip"
@@ -242,90 +245,167 @@ object SaveDirManager {
         return intents
     }
 
-    /** OEM 文件管理器的包名/类名特征：命中者排在选择器首行，避免被网盘、浏览器类噪音淹没 */
+    /** OEM 文件管理器的包名/类名特征：命中者排在选择列表最前，避免被网盘、浏览器类噪音淹没 */
     private val FILE_MANAGER_HINTS = listOf(
         "filemanager", "fileexplorer", "file_manager", "filebrowser",
         "documentsui", "myfiles", "esfileexplorer", "filemaster"
     )
 
+    /** 「打开保存目录」的一个候选应用 */
+    class DirOpener(val label: CharSequence, val icon: Drawable, val component: ComponentName)
+
+    private fun prefs(context: Context) =
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+
+    /** 用户上次在选择列表中选中的默认打开方式（null 表示尚未选择） */
+    fun getPreferredOpener(context: Context): ComponentName? {
+        val saved = prefs(context).getString(KEY_PREF_DIR_OPENER, null) ?: return null
+        val parts = saved.split("/", limit = 2)
+        if (parts.size != 2) return null
+        return ComponentName(parts[0], parts[1])
+    }
+
+    /** 记住用户选中的默认打开方式 */
+    fun setPreferredOpener(context: Context, component: ComponentName) {
+        prefs(context).edit()
+            .putString(KEY_PREF_DIR_OPENER, "${component.packageName}/${component.className}")
+            .apply()
+    }
+
     /**
-     * 用其他应用打开当前保存目录。
+     * 解析所有「能打开保存目录」的应用。
      *
-     * 流程：按候选顺序找到**第一个有解析结果**的目录 Intent（保住「自定义目录优先」语义）→
-     * 收集它的全部处理应用 → 文件管理器类排在首行（`EXTRA_INITIAL_INTENTS`）→ 再交给系统
-     * 选择器展示全部候选。不直接 `startActivity` 某个应用，是因为无法可靠识别「哪个是用户
-     * 想用的文件管理器」，排序 + 系统选择器是兼容性与体验的平衡点。
-     *
-     * @return 是否成功调起了「用其他应用打开」选择器
+     * 按候选顺序取第一个**有解析结果**的目录 Intent（保住「自定义目录优先」语义），收集它的
+     * 全部处理应用并按文件管理器特征排序。目录 MIME 有两套互不覆盖的注册口径：
+     * 系统 DocumentsUI 认 `vnd.android.document/directory`，而大量 OEM/第三方文件管理器只注册
+     * `resource/folder`（实测 vivo 自带文件管理不在前者的解析结果里），两套都要探测。
      */
-    fun openDir(context: Context): Boolean {
+    fun resolveDirOpeners(context: Context): List<DirOpener> {
         val pm = context.packageManager
-
-        // 按候选顺序取第一个「至少有一个应用能处理」的目录 Intent
-        var matchedIntent: Intent? = null
         for (intent in buildDirIntents(context)) {
-            val hasResolver = try {
-                pm.queryIntentActivities(intent, 0).isNotEmpty()
+            val resolvers = try {
+                pm.queryIntentActivities(intent, 0)
             } catch (e: Exception) {
-                false
+                emptyList()
             }
-            if (hasResolver) {
-                matchedIntent = intent
-                break
-            }
-        }
-        if (matchedIntent == null) {
-            DebugLogger.log(TAG, "没有可打开保存目录的应用（候选目录均无法调起）")
-            return false
-        }
+            if (resolvers.isEmpty()) continue
 
-        // 收集该 Intent 的全部处理应用，文件管理器类排前面
-        data class Handler(val intent: Intent, val isFileManager: Boolean)
-        val seen = HashSet<String>()
-        val handlers = mutableListOf<Handler>()
-        try {
-            for (ri in pm.queryIntentActivities(matchedIntent, 0)) {
+            data class Entry(val opener: DirOpener, val isFileManager: Boolean)
+            val seen = HashSet<String>()
+            val entries = mutableListOf<Entry>()
+            for (ri in resolvers) {
                 val pkg = ri.activityInfo.packageName
                 val cls = ri.activityInfo.name
                 if (!seen.add("$pkg/$cls")) continue
                 val lowered = "${pkg.lowercase()}/${cls.lowercase()}"
                 val isFileManager = FILE_MANAGER_HINTS.any { lowered.contains(it) }
-                handlers += Handler(
-                    Intent(matchedIntent).setComponent(ComponentName(pkg, cls)),
+                entries += Entry(
+                    DirOpener(
+                        label = ri.loadLabel(pm),
+                        icon = ri.loadIcon(pm),
+                        component = ComponentName(pkg, cls)
+                    ),
                     isFileManager
                 )
             }
-        } catch (e: Exception) {
-            DebugLogger.log(TAG, "解析目录处理应用失败(退回系统选择器): ${e.message}")
+            return entries.sortedByDescending { it.isFileManager }.map { it.opener }
         }
-        if (handlers.isEmpty()) {
-            DebugLogger.log(TAG, "没有可打开保存目录的应用（无解析结果）")
+        return emptyList()
+    }
+
+    /**
+     * 用指定应用打开当前保存目录。
+     *
+     * 会遍历候选 Intent 找到该组件能响应的那一个（不同应用注册的 MIME 口径不同），逐个尝试
+     * 直到调起成功。
+     *
+     * @return 是否成功调起
+     */
+    fun launchDirWith(context: Context, component: ComponentName): Boolean {
+        for (intent in buildDirIntents(context)) {
+            val resolvers = try {
+                pm(context)?.queryIntentActivities(intent, 0)
+            } catch (e: Exception) {
+                null
+            }
+            val matches = resolvers?.any {
+                it.activityInfo.packageName == component.packageName &&
+                    it.activityInfo.name == component.className
+            } == true
+            if (!matches) continue
+            try {
+                val target = Intent(intent).setComponent(component)
+                if (context !is Activity) {
+                    target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(target)
+                DebugLogger.log(TAG, "已用 ${component.packageName} 打开保存目录: ${getDisplayPath(context)}")
+                return true
+            } catch (e: Exception) {
+                DebugLogger.log(TAG, "用 ${component.packageName} 打开目录失败: ${e.message}")
+            }
+        }
+        return false
+    }
+
+    private fun pm(context: Context) = context.packageManager
+
+    /**
+     * 「打开保存目录」的统一入口。
+     *
+     * 优先用用户记住的默认应用直接打开（成功后回调 [onOpened]）；没有默认应用、默认应用已
+     * 卸载/失效，或 [forceChooser] 为 true（长按重新选择）时，回调 [onNeedChoose] 交给调用方
+     * 弹出选择列表 —— 系统 chooser 拿不到「用户选了哪个」，无法记住默认应用，所以选择列表
+     * 必须用应用内对话框实现；用户选中后调 [setPreferredOpener] + [launchDirWith] 完成闭环。
+     *
+     * @return false 表示没有任何应用可处理（调用方需提示用户）；true 表示已直接打开或已回调
+     */
+    fun openDir(
+        context: Context,
+        forceChooser: Boolean = false,
+        onOpened: () -> Unit = {},
+        onNeedChoose: (List<DirOpener>) -> Unit
+    ): Boolean {
+        val openers = resolveDirOpeners(context)
+        if (openers.isEmpty()) {
+            DebugLogger.log(TAG, "没有可打开保存目录的应用（候选目录均无法调起）")
             return false
         }
-        handlers.sortByDescending { it.isFileManager }
 
-        val base = handlers.first().intent
-        if (context !is Activity) {
-            base.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val preferred = getPreferredOpener(context)
+        if (!forceChooser && preferred != null) {
+            val stillValid = openers.any { it.component == preferred }
+            if (stillValid && launchDirWith(context, preferred)) {
+                onOpened()
+                return true
+            }
+            DebugLogger.log(TAG, "默认打开方式已失效: $preferred，改为弹出选择列表")
         }
-        val chooser = Intent.createChooser(base, "用其他应用打开")
-        if (handlers.size > 1) {
-            // 其余应用（含全部文件管理器）按排好的顺序放在选择器首行之后
-            chooser.putExtra(
-                Intent.EXTRA_INITIAL_INTENTS,
-                handlers.drop(1).map { it.intent }.toTypedArray()
-            )
-        }
-        if (context !is Activity) {
-            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(chooser)
-        DebugLogger.log(
-            TAG,
-            "已调起「其他应用打开」选择器: ${getDisplayPath(context)}, " +
-                "候选 ${handlers.size} 个(文件管理器优先)"
-        )
+        onNeedChoose(openers)
         return true
+    }
+
+    /**
+     * 弹出「选择打开保存目录的应用」对话框（图标 + 应用名的简单列表）。
+     *
+     * 用应用内对话框而不是系统 chooser 的原因见 [openDir]：需要捕获用户的选择以记住默认应用。
+     */
+    fun showOpenerPickerDialog(
+        activity: Activity,
+        openers: List<DirOpener>,
+        onPicked: (DirOpener) -> Unit,
+        onDismiss: () -> Unit = {}
+    ) {
+        val labels = openers.map { it.label }.toTypedArray()
+        val dialog = AlertDialog.Builder(activity)
+            .setTitle("选择打开保存目录的应用")
+            .setItems(labels) { _, which ->
+                onPicked(openers[which])
+            }
+            .setNegativeButton("取消", null)
+            .show()
+        // 选中与取消都会触发 dismiss：调用方（如透明跳板 Activity）借此完成自身收尾
+        dialog.setOnDismissListener { onDismiss() }
     }
 
     // ==================== 内部工具函数 ====================

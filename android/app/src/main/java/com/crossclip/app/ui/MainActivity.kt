@@ -385,8 +385,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         tvSaveDirPath.setOnClickListener {
-            // 用其他应用打开：交给系统选择器，由用户挑选文件管理器或任意可处理目录的应用
-            openSaveDirWithOtherApps()
+            // 单击：用默认应用直接打开（首次点击会先弹选择器，选中即设为默认）
+            openSaveDirWithOtherApps(forceChooser = false)
+        }
+        tvSaveDirPath.setOnLongClickListener {
+            // 长按：重新选择打开方式，选中的应用成为新的默认
+            openSaveDirWithOtherApps(forceChooser = true)
+            true
         }
 
         tvResetSaveDir.setOnClickListener {
@@ -624,9 +629,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 点击保存目录路径：用其他应用打开当前保存目录 */
-    private fun openSaveDirWithOtherApps() {
-        if (!SaveDirManager.openDir(this)) {
+    /**
+     * 点击保存目录路径：用默认应用直接打开；长按（[forceChooser]=true）重新弹选择列表，
+     * 选中的应用会被记住为默认，之后单击直接打开。
+     */
+    private fun openSaveDirWithOtherApps(forceChooser: Boolean) {
+        val handled = SaveDirManager.openDir(this, forceChooser,
+            onOpened = {
+                // 已用默认应用直接打开，无需额外处理
+            },
+            onNeedChoose = { openers ->
+                SaveDirManager.showOpenerPickerDialog(
+                    this,
+                    openers,
+                    onPicked = { picked ->
+                        SaveDirManager.setPreferredOpener(this, picked.component)
+                        if (SaveDirManager.launchDirWith(this, picked.component)) {
+                            Toast.makeText(this, "已记住「${picked.label}」为默认打开方式，长按路径可重新选择", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(this, "打开保存目录失败", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                )
+            }
+        )
+        if (!handled) {
             Toast.makeText(this, "没有可打开该目录的应用，请手动前往该目录", Toast.LENGTH_LONG).show()
         }
     }

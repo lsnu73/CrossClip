@@ -26,13 +26,34 @@ class OpenSaveDirActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val opened = SaveDirManager.openDir(this)
-        if (!opened) {
+        val handled = SaveDirManager.openDir(
+            this,
+            forceChooser = false,
+            onOpened = {
+                // 已用记住的默认应用直接打开
+                finish()
+            },
+            onNeedChoose = { openers ->
+                // 首次使用/默认方式失效：弹选择列表，选中即记住为默认。
+                // 注意 finish() 必须推迟到对话框结束之后，否则对话框会随 Activity 一起消失；
+                // 取消（dismiss）同样要 finish，避免透明 Activity 残留
+                SaveDirManager.showOpenerPickerDialog(
+                    this,
+                    openers,
+                    onPicked = { picked ->
+                        SaveDirManager.setPreferredOpener(applicationContext, picked.component)
+                        SaveDirManager.launchDirWith(applicationContext, picked.component)
+                    },
+                    onDismiss = { finish() }
+                )
+            }
+        )
+        if (!handled) {
             // 设备上没有任何应用能处理「目录」类型的 Intent 时，必须给出明确反馈，
             // 否则用户点击通知后会「什么也没发生」，无从判断是失败还是卡住。
             Toast.makeText(this, "未找到可打开文件夹的应用", Toast.LENGTH_LONG).show()
+            finish()
         }
-        DebugLogger.log("OPEN_SAVE_DIR", "通知点击打开保存目录: opened=$opened")
-        finish()
+        DebugLogger.log("OPEN_SAVE_DIR", "通知点击打开保存目录: handled=$handled")
     }
 }
