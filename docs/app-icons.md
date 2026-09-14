@@ -72,15 +72,25 @@ Android 把通知小图标当作 **alpha 蒙版**渲染: 只取形状、丢弃�
 所以全部通知的小图标都走 `SyncForegroundService.NOTIFICATION_SMALL_ICON` 这一个常量:
 
 ```kotlin
-val NOTIFICATION_SMALL_ICON = R.drawable.ic_launcher_foreground
+val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 ```
 
-- **新增通知时请复用该常量**, 不要写字面量, 更不要改回 `@mipmap/ic_launcher`;
+`ic_notification_foreground` 是**通知专用剪影层**(432×432, 透明底, 图案主体居中约 62%):
+从源图 `软件图标.png` 抠出「手机 + 电脑 + WiFi」图案主体, 不含圆角方块背景。
+
+注意它与 `ic_launcher_foreground` **不是同一张图**, 分工不同:
+
+- `ic_launcher_foreground`(自适应图标前景层): 承载**整张彩色圆角方块图**, 与白色背景层
+  叠加构成启动器图标 —— 它几乎整张不透明, 套上通知蒙版就是实心方块, **不能**给通知用;
+- `ic_notification_foreground`(通知剪影层): 只有图案主体的形状, 就是为 alpha 蒙版设计的。
+
+- **新增通知时请复用该常量**, 不要写字面量, 更不要改回 `@mipmap/ic_launcher`
+  或 `ic_launcher_foreground`;
 - 分享面板的通知(`receiver/ShareReceiveActivity.kt`)也复用它 —— 通知栏里所有 CrossClip
   通知必须看起来来自同一个 App, 所以图标来源只允许存在一处;
-- 历史上这里用的是 Android 系统内置图标(`android.R.drawable.ic_menu_share` /
-  `ic_menu_save` / `ic_dialog_info` / `ic_dialog_alert` / `ic_menu_upload`), 与应用图标毫无关系 ——
-  现象就是「通知栏里显示的是另一个图标」。已全部替换, **不要改回去**。
+- 历史上这里先是 Android 系统内置图标(`android.R.drawable.ic_menu_share` 等),
+  后一度指向 `ic_launcher_foreground`, 结果通知栏只是一个实心圆角方块、
+  看不出应用图案 —— 已改为专用剪影层, **不要改回去**。
 
 ### 2.3 快捷磁贴
 
@@ -99,6 +109,7 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_launcher_foreground
 | `mipmap-xxhdpi/...` | 144×144 |
 | `mipmap-xxxhdpi/...` | 192×192 |
 | `drawable-xxxhdpi/ic_launcher_foreground.png` | 432×432, RGBA, 含安全边距 |
+| `drawable-xxxhdpi/ic_notification_foreground.png` | 432×432, RGBA, 透明底图案主体剪影(通知专用, 见 §2.2) |
 | `values/ic_launcher_background.xml` | 背景色, 当前 `#FFFFFF` |
 
 密度比例 1× / 1.5× / 2× / 3× / 4×, 基数 48px。

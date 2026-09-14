@@ -368,13 +368,15 @@ UI 上提供各厂商的「加锁」操作指引。
 
 **根因**: Android 把通知小图标当作 **alpha 蒙版**渲染 —— 只取形状、丢弃颜色。
 `@mipmap/ic_launcher` 是自适应图标的**完整图**(前景层 + **不透明**背景层),
-整张都不透明, 套上蒙版就是一个实心方块; 而 `@drawable/ic_launcher_foreground`
-是透明底 + 图案的那一层, 蒙版后才是应用图标本身的形状剪影。
+整张都不透明, 套上蒙版就是一个实心方块; `@drawable/ic_launcher_foreground` 虽是
+前景层, 但它承载的是整张彩色圆角方块图(供启动器叠加白色底色), 蒙版后同样只是
+一个实心圆角方块, 看不出应用图案。
 
-**解法**: 所有通知的小图标统一走一个常量:
+**解法**: 通知使用**专用剪影层** `ic_notification_foreground`(从源图抠出的
+「手机+电脑+WiFi」图案主体, 透明底), 并让所有通知的小图标统一走一个常量:
 
 ```kotlin
-val NOTIFICATION_SMALL_ICON = R.drawable.ic_launcher_foreground
+val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 ```
 
 - 新增通知时**复用该常量**, 不要写字面量、不要改回 `@mipmap/ic_launcher`;

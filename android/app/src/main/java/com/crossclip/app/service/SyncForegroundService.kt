@@ -88,15 +88,19 @@ class SyncForegroundService : Service() {
          * 所有通知共用的**小图标**。
          *
          * 这里要的是「图案」，不是「图标」：Android 会把通知小图标当成 alpha 蒙版来渲染 ——
-         * 只取形状、丢弃颜色。而 `@mipmap/ic_launcher` 是自适应图标的**完整图**
-         * （前景层 + 不透明背景层），整张都不透明，套上蒙版就是一坨**实心方块**；
-         * `ic_launcher_foreground` 是透明底 + 图案的那一层，蒙版后才是应用图标本身的形状剪影。
+         * 只取形状、丢弃颜色。所以它必须是**透明底 + 图案主体剪影**的独立 drawable：
+         * - `@mipmap/ic_launcher`（完整图，含不透明背景）套上蒙版是一坨实心方块；
+         * - `ic_launcher_foreground` 是自适应图标的前景层，但当前它承载的是整张彩色
+         *   圆角方块图（供启动器叠加白色底色用），蒙版后同样只是一个实心圆角方块 ——
+         *   看不出应用图标的任何图案。
+         * `ic_notification_foreground` 是从 `软件图标.png` 单独抠出的图案主体剪影
+         * （手机 + 电脑 + WiFi，透明底、含安全边距），蒙版后才是应用图标的形状剪影。
          *
-         * 所以换应用图标时要同步更新的是这张前景图，**不要**顺手改成 `@mipmap/ic_launcher`。
+         * 所以换应用图标时要同步更新的是这张剪影图，**不要**顺手改成 `@mipmap/ic_launcher`。
          * 分享通知（com.crossclip.app.receiver.ShareReceiveActivity）复用同一常量，
          * 保证通知栏里所有 CrossClip 通知看起来来自同一个 App。
          */
-        val NOTIFICATION_SMALL_ICON = R.drawable.ic_launcher_foreground
+        val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 
         const val ACTION_MANUAL_SEND = "com.crossclip.app.ACTION_MANUAL_SEND"
         const val ACTION_WATCHDOG = "com.crossclip.app.ACTION_WATCHDOG"
