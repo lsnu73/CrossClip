@@ -121,7 +121,7 @@
 ```text
 用户复制 → PrimaryClipChangedListener / Shizuku 监听触发
         → SyncForegroundService.onLocalClipboardChanged()
-        → 计算 SHA-256 查 recentHashes(50 条环形队列) 去重
+        → 计算 SHA-256 查 recentHashes(60 秒时间窗去重) 命中则跳过
         → HttpUploader.sendClipboard() → POST /sync (密文)
         → 电脑端 server.rs 解密 → 校验 hash → 写入系统剪贴板 + 记录 LAST_TEXT_HASH
         → 电脑端 SSE 广播 FILE_PROGRESS / 直接回推? (不回推, 由电脑端 IS_UPDATING_SELF 抑制)
@@ -191,7 +191,10 @@
 **解法**: 双端各自维护一个「最近发送内容哈希」的环形队列:
 - Windows: `clipboard.rs` 的 `LAST_TEXT_HASH` + `IS_UPDATING_SELF` 原子标志
   (自己写剪贴板前置位, 写完清除, 监听回调看到置位就直接返回);
-- Android: `SyncForegroundService.recentHashes`(`ArrayDeque<String>(50)`)。
+- Android: `SyncForegroundService.recentHashes`(`LinkedHashMap<String, Long>`, 最多 50 条,
+  **每条只保留 60 秒**) —— 判重只看时间窗内: 回环反射/监听双发都在秒级, 而用户几分钟后
+  重新复制同一段内容是合法诉求(电脑端剪贴板可能早已改变), 必须放行;
+  被去重跳过时会打 `CLIP_DETECT` 日志, 不是无声丢弃。
 
 **新增任何「写入剪贴板」的代码路径时, 都必须把内容哈希塞进这个队列**, 否则回环会立刻出现。
 

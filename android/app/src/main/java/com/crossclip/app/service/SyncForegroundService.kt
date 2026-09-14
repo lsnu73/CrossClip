@@ -62,6 +62,9 @@ class SyncForegroundService : Service() {
     )
 
     companion object {
+        /** 防回环去重窗口：超过该时长的同内容复制视为用户主动行为，放行同步 */
+        private const val DEDUP_WINDOW_MS = 60_000L
+
         /** 静默守护通知渠道（IMPORTANCE_MIN，可在系统设置中关闭展示） */
         const val CHANNEL_ID = "cross_clip_silent_v2"
 
@@ -129,7 +132,34 @@ class SyncForegroundService : Service() {
 
     private lateinit var clipboardManager: ClipboardManager
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val recentHashes = ArrayDeque<String>(50)
+    /**
+     * 防回环去重表：hash → 注册时刻。
+     *
+     * 判重只看**时间窗**内（[DEDUP_WINDOW_MS]）的记录，过期即允许同一内容再次同步 ——
+     * 回环反射与监听器双发都发生在秒级，而用户几分钟后故意重新复制同一段内容是合法诉求
+     * （此时电脑端剪贴板可能早已变成别的内容）。旧实现用纯 Set 存最近 50 条、永不过期，
+     * 重复制同内容会被无声吞掉，且毫无日志，排查时表现为「监听触发了但没同步」。
+     */
+    private val recentHashes = LinkedHashMap<String, Long>(64)
+
+    /** 该哈希是否命中去重窗口（顺带清理过期与超量记录，Map 按插入序淘汰最旧） */
+    private fun isRecentlySeenHash(hash: String): Boolean = synchronized(recentHashes) {
+        val now = System.currentTimeMillis()
+        val it = recentHashes.entries.iterator()
+        while (it.hasNext()) {
+            val entry = it.next()
+            if (now - entry.value > DEDUP_WINDOW_MS || recentHashes.size > 50) it.remove() else break
+        }
+        recentHashes.containsKey(hash)
+    }
+
+    /** 登记一个刚发送/刚接收内容的哈希，用于防回环去重 */
+    private fun rememberHash(hash: String) = synchronized(recentHashes) {
+        recentHashes[hash] = System.currentTimeMillis()
+        while (recentHashes.size > 50) {
+            recentHashes.remove(recentHashes.keys.first())
+        }
+    }
 
     private lateinit var lanDiscovery: LanDiscovery
     private lateinit var nsdHelper: NsdHelper
@@ -1047,13 +1077,16 @@ class SyncForegroundService : Service() {
             }
             if (!text.isNullOrEmpty()) {
                 val hash = CryptoUtil.computeHash(text)
-                synchronized(recentHashes) {
-                    if (recentHashes.contains(hash)) {
-                        return
-                    }
-                    recentHashes.add(hash)
-                    if (recentHashes.size > 50) recentHashes.removeFirst()
+                if (isRecentlySeenHash(hash)) {
+                    val preview = if (text.length > 20) text.take(20) + "..." else text
+                    Log.i(TAG, "剪贴板内容与近期同步记录相同，跳过（防回环去重）")
+                    DebugLogger.log(
+                        "CLIP_DETECT",
+                        "剪贴板内容命中近期去重记录，跳过同步（防回环）: 长度=${text.length}, 预览=[$preview]"
+                    )
+                    return
                 }
+                rememberHash(hash)
                 val preview = if (text.length > 20) text.take(20) + "..." else text
                 Log.i(TAG, "检测到本地复制 ($readSource)，正在静默自动同步至电脑...")
                 lastSyncEvent = "手机复制: 长度 ${text.length}"
@@ -1083,10 +1116,7 @@ class SyncForegroundService : Service() {
     private fun onNetworkTextReceived(text: String) {
         acquireTransientWakeLock(3000L)
         val hash = CryptoUtil.computeHash(text)
-        synchronized(recentHashes) {
-            recentHashes.add(hash)
-            if (recentHashes.size > 50) recentHashes.removeFirst()
-        }
+        rememberHash(hash)
 
         val preview = if (text.length > 20) text.take(20) + "..." else text
         DebugLogger.log("CLIP_RECV", "收到电脑端下发剪贴板: 长度=${text.length}, hash=$hash, 预览=[$preview]")
@@ -1132,10 +1162,7 @@ class SyncForegroundService : Service() {
     fun sendTextManual(text: String, callback: ((Boolean) -> Unit)? = null) {
         if (text.isNotEmpty()) {
             val hash = CryptoUtil.computeHash(text)
-            synchronized(recentHashes) {
-                recentHashes.add(hash)
-                if (recentHashes.size > 50) recentHashes.removeFirst()
-            }
+            rememberHash(hash)
             if (currentPcIp.isEmpty() || pinCode.isEmpty()) {
                 Toast.makeText(applicationContext, "尚未连接电脑，请输入电脑显示的 6 位 PIN 码", Toast.LENGTH_SHORT).show()
                 callback?.invoke(false)
