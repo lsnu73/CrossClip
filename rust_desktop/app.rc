@@ -1,0 +1,4 @@
+// CrossClip 可执行文件图标。
+// 资源 ID 取 1：Explorer 与任务栏会把 ID 最小的 ICON 资源当作程序主图标。
+// 图案与手机端启动图标同源（见 assets/app.ico 与 android/.../mipmap-*/ic_launcher.png）。
+1 ICON "assets/app.ico"

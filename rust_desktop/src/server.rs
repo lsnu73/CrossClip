@@ -243,6 +243,20 @@ impl Broadcaster {
     pub fn get_peers(&self) -> Vec<ClientPeer> {
         self.peers.read().unwrap().clone()
     }
+
+    /// 摘除指定 IP 的对等节点（手机端主动断开、或 SSE 长连接结束时调用）。
+    ///
+    /// peers 表原本只在 600 秒无心跳后才被修剪，于是手机端早已断开、托盘菜单却还挂着
+    /// 「已连接手机」整整 10 分钟 —— 这正是要修的状态判断错误。连接真正结束时就地摘除，
+    /// 600 秒心跳超时退化为「连 TCP 都不通知一声就消失」场景的兜底。
+    pub fn unregister_peer(&self, ip: &str) {
+        let mut peers = self.peers.write().unwrap();
+        let before = peers.len();
+        peers.retain(|p| p.ip != ip);
+        if peers.len() != before {
+            println!("[Server] 已摘除对等节点: {}", ip);
+        }
+    }
 }
 
 fn send_raw_http_post(ip: &str, port: u16, path: &str, json_body: &str) -> bool {
@@ -295,11 +309,11 @@ fn write_http_request(
     Ok(())
 }
 
-/// 读取并完整消费一个 HTTP 响应。
+/// 读取并完整消费一个 HTTP 响应，返回响应体文本。
 ///
 /// 必须把响应体读干净，否则残留字节会与下一个请求的响应「串包」，
 /// 这是 keep-alive 复用连接时最容易踩的坑。
-fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<(), String> {
+fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<String, String> {
     // 1. 状态行
     let mut status_line = String::new();
     reader
@@ -334,8 +348,19 @@ fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<(), String> {
         reader
             .read_exact(&mut body)
             .map_err(|e| format!("读取响应体失败: {}", e))?;
+        Ok(String::from_utf8_lossy(&body).to_string())
+    } else {
+        Ok(String::new())
     }
-    Ok(())
+}
+
+/// 一次「电脑 → 手机」文件发送的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// 文件已完整传输并在手机端落盘
+    Sent,
+    /// 手机端已存在同名同内容的文件，本次一个分块都没传
+    SkippedExisting,
 }
 
 /// 把文件完整发送到手机端（prepare → chunk×N → complete）。
@@ -344,6 +369,11 @@ fn read_http_response(reader: &mut BufReader<TcpStream>) -> Result<(), String> {
 /// 整个文件的**所有分块复用同一条 TCP 连接**（HTTP keep-alive）。
 /// 旧实现每个分块都 `TcpStream::connect_timeout` 新建连接并以 `Connection: close` 收尾，
 /// 传输 100MB 文件会产生上千次 TCP 三次握手，是速度慢的主因之一。
+///
+/// ## 接收端去重
+/// `prepare` 请求里带上整文件哈希。手机端若发现目标目录已有「同名 + 同大小 + 同哈希」
+/// 的文件，会在响应里回 `already_exists: true`；此时**一个分块都不发**，直接返回
+/// [`SendOutcome::SkippedExisting`]。老版本手机端不认识这个字段，行为与从前完全一致。
 ///
 /// @param on_progress 每完成一个分块回调一次 `(已完成块数, 总块数)`
 pub fn send_file_to_phone(
@@ -355,7 +385,7 @@ pub fn send_file_to_phone(
     file_hash: &str,
     sender_id: &str,
     mut on_progress: impl FnMut(u32, u32),
-) -> Result<(), String> {
+) -> Result<SendOutcome, String> {
     let host = format!("{}:{}", ip, port);
     let socket_addr: SocketAddr = host
         .parse()
@@ -373,7 +403,7 @@ pub fn send_file_to_phone(
         .map_err(|e| format!("复制连接句柄失败: {}", e))?;
     let mut reader = BufReader::new(stream);
 
-    // ---------- 1. 发送文件元数据 ----------
+    // ---------- 1. 发送文件元数据（含整文件哈希，供接收端做去重判定） ----------
     let prepare_body = serde_json::json!({
         "type": "FILE_PREPARE",
         "file_id": transfer.file_id,
@@ -381,6 +411,7 @@ pub fn send_file_to_phone(
         "file_size": transfer.file_size,
         "mime_type": "application/octet-stream",
         "sender_id": sender_id,
+        "file_hash": file_hash,
     })
     .to_string();
     write_http_request(
@@ -390,21 +421,37 @@ pub fn send_file_to_phone(
         "application/json; charset=utf-8",
         prepare_body.as_bytes(),
     )?;
-    read_http_response(&mut reader)?;
 
-    // ---------- 2. 逐块发送（复用同一连接） ----------
-    for idx in 0..transfer.total_chunks {
-        let encrypted = file_manager.get_chunk_encrypted_bytes(&transfer.file_id, idx, pin)?;
-        let path = format!(
-            "/file/chunk?file_id={}&index={}&total={}",
-            transfer.file_id, idx, transfer.total_chunks
+    let prepare_response = read_http_response(&mut reader)?;
+    // 接收端已有同一文件：一个分块都不用发
+    let skipped_existing = prepare_response.contains("\"already_exists\":true");
+
+    if skipped_existing {
+        println!(
+            "[FileTransfer] 手机端已存在相同文件，跳过全部分块: {}",
+            transfer.filename
         );
-        write_http_request(&mut writer, &host, &path, "application/octet-stream", &encrypted)?;
-        read_http_response(&mut reader)?;
-        on_progress(idx + 1, transfer.total_chunks);
+    } else {
+        // ---------- 2. 逐块发送（复用同一连接） ----------
+        for idx in 0..transfer.total_chunks {
+            let encrypted = file_manager.get_chunk_encrypted_bytes(&transfer.file_id, idx, pin)?;
+            let path = format!(
+                "/file/chunk?file_id={}&index={}&total={}",
+                transfer.file_id, idx, transfer.total_chunks
+            );
+            write_http_request(&mut writer, &host, &path, "application/octet-stream", &encrypted)?;
+            let _ = read_http_response(&mut reader)?;
+            on_progress(idx + 1, transfer.total_chunks);
+        }
     }
 
-    // ---------- 3. 发送完成信号（携带整文件哈希供手机端校验） ----------
+    // ---------- 3. 发送完成信号（携带整文件哈希供接收端校验） ----------
+    //
+    // **即使一个分块都没发，也必须走完这一步。** 它是接收端「本轮传输结束」的唯一信号：
+    // 接收端据此收起进行中的提示、完成校验与落盘（或复用已有文件）、回收传输记录。
+    // 早先的实现在去重命中时直接 return，后果有两个：
+    //   - 手机端通知永远停在「正在接收文件」（不定进度条还会一直循环）；
+    //   - 两端的传输记录都不会被回收，电脑端 incoming 表会持续增长。
     let complete_body = serde_json::json!({
         "type": "FILE_COMPLETE",
         "file_id": transfer.file_id,
@@ -418,9 +465,13 @@ pub fn send_file_to_phone(
         "application/json; charset=utf-8",
         complete_body.as_bytes(),
     )?;
-    read_http_response(&mut reader)?;
+    let _ = read_http_response(&mut reader)?;
 
-    Ok(())
+    Ok(if skipped_existing {
+        SendOutcome::SkippedExisting
+    } else {
+        SendOutcome::Sent
+    })
 }
 
 pub fn start_http_server(
@@ -559,6 +610,33 @@ fn handle_client_request(
         return;
     }
 
+    // 手机端点了「断开连接」时主动打招呼：立即摘掉它的对等节点，
+    // 不必等 SSE 写失败（最长 30 秒）或心跳超时（600 秒）。
+    // 与别的端点一样用 pin_hash 校验，避免任意设备把别人的连接记录踢掉。
+    if path == "/disconnect" && method == Method::Post {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_ok() {
+            if let Ok(req) = serde_json::from_str::<HeartbeatRequest>(&body) {
+                let current_pin = pin_code.read().unwrap().clone();
+                let my_hash = crate::crypto::compute_hash(&current_pin);
+                let my_hash_prefix = &my_hash[..16.min(my_hash.len())];
+                if req.pin_hash.as_deref() == Some(my_hash_prefix) {
+                    broadcaster.unregister_peer(&client_ip);
+                    let resp = Response::from_string(r#"{"status":"ok","message":"disconnected"}"#)
+                        .with_header(cors_header)
+                        .with_header(content_type);
+                    let _ = request.respond(resp);
+                    return;
+                }
+            }
+        }
+        let resp = Response::from_string(r#"{"status":"error"}"#)
+            .with_status_code(StatusCode(403))
+            .with_header(cors_header);
+        let _ = request.respond(resp);
+        return;
+    }
+
     if path == "/events" && method == Method::Get {
         let current_pin = pin_code.read().unwrap().clone();
         let query_pin = extract_pin_from_query(&url).unwrap_or_default();
@@ -579,7 +657,8 @@ fn handle_client_request(
             return;
         }
 
-        broadcaster.register_peer(client_ip, 18237, "android_phone".to_string(), "安卓手机".to_string());
+        // clone 而非 move：这个连接结束时还要用同一个 IP 把自己从 peers 里摘掉
+        broadcaster.register_peer(client_ip.clone(), 18237, "android_phone".to_string(), "安卓手机".to_string());
 
         let (tx, rx) = channel::<String>();
         {
@@ -590,6 +669,9 @@ fn handle_client_request(
         let mut writer = request.into_writer();
         let response_line = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache, no-transform\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
         if writer.write_all(response_line.as_bytes()).is_err() {
+            // 响应头都没能写出去，这条 SSE 对手机端等于不存在 ——
+            // 回滚掉上面刚做的注册，别让托盘凭一个假的连接显示「已连接手机」
+            broadcaster.unregister_peer(&client_ip);
             return;
         }
         let _ = writer.flush();
@@ -605,6 +687,9 @@ fn handle_client_request(
                 break;
             }
         }
+        // SSE 长连接结束 = 手机端不再与电脑相连，就地摘掉对等节点，
+        // 让托盘菜单的「已连接手机」与真实状态同步（而不是继续挂 600 秒）。
+        broadcaster.unregister_peer(&client_ip);
         return;
     }
 
@@ -746,10 +831,23 @@ fn handle_client_request(
                 let current_pin = pin_code.read().unwrap().clone();
                 match file_manager.handle_prepare(&prepare, &current_pin) {
                     Ok(()) => {
+                        // 去重命中时明确告知发送端「别再传分块了」；
+                        // 老版本发送端不认识这个字段，会照常传完 —— 只是白跑一趟，不会出错。
+                        let already_exists = file_manager.is_dedup_hit(&prepare.file_id);
+                        // 接收侧同样走自绘浮窗（系统气泡没有进度条，且与浮窗重复）。
+                        // 已判定目标目录存在同一文件时不弹窗 —— 马上就结束了，闪一下反而干扰。
+                        if !already_exists {
+                            crate::progress_window::show_progress(
+                                "正在接收文件",
+                                &prepare.filename,
+                                prepare.file_size,
+                            );
+                        }
                         let resp = serde_json::json!({
                             "status": "ok",
                             "message": "准备接收文件",
-                            "file_id": prepare.file_id
+                            "file_id": prepare.file_id,
+                            "already_exists": already_exists
                         });
                         let resp_str = resp.to_string();
                         let resp = Response::from_string(resp_str)
@@ -825,6 +923,11 @@ fn handle_client_request(
                     clients.retain(|client| client.send(msg.clone()).is_ok());
                 }
 
+                // 同步刷新本机进度浮窗
+                if let Some((done, total_bytes)) = file_manager.incoming_progress(&file_id) {
+                    crate::progress_window::update_progress(done, total_bytes);
+                }
+
                 let resp = serde_json::json!({
                     "status": "ok",
                     "received": received,
@@ -856,13 +959,24 @@ fn handle_client_request(
             if let Ok(complete) = serde_json::from_str::<crate::file_transfer::FileComplete>(&body) {
                 let current_pin = pin_code.read().unwrap().clone();
                 match file_manager.handle_complete(&complete, &current_pin) {
-                    Ok(final_path) => {
+                    Ok((final_path, deduplicated)) => {
                         let path_str = final_path.to_string_lossy().to_string();
+                        // 接收结束：浮窗切到终态（几秒后自动消失），与发送侧表现一致
+                        crate::progress_window::finish(
+                            if deduplicated {
+                                "文件已存在，未重复写入"
+                            } else {
+                                "文件接收完成"
+                            },
+                            &path_str,
+                            true,
+                        );
                         // 通过 SSE 广播文件接收完成事件
                         let complete_event = serde_json::json!({
                             "type": "FILE_RECEIVED",
                             "file_id": complete.file_id,
-                            "path": path_str
+                            "path": path_str,
+                            "deduplicated": deduplicated
                         });
                         let msg = format!("data: {}\n\n", complete_event);
                         {
@@ -872,8 +986,13 @@ fn handle_client_request(
 
                         let resp = serde_json::json!({
                             "status": "ok",
-                            "message": "文件接收完成",
-                            "path": path_str
+                            "message": if deduplicated {
+                                "电脑端已存在相同文件，未重复写入"
+                            } else {
+                                "文件接收完成"
+                            },
+                            "path": path_str,
+                            "deduplicated": deduplicated
                         });
                         let resp = Response::from_string(resp.to_string())
                             .with_header(cors_header)
@@ -882,6 +1001,8 @@ fn handle_client_request(
                         return;
                     }
                     Err(e) => {
+                        // 失败同样要给出终态，否则浮窗会一直停在半途
+                        crate::progress_window::finish("文件接收失败", &e, false);
                         let resp = serde_json::json!({
                             "status": "error",
                             "message": e

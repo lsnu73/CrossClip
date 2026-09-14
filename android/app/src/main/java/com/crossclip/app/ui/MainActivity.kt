@@ -39,7 +39,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvDiscoveredDevice: TextView
     private lateinit var btnSwitchDevice: TextView
     private lateinit var llDeviceHeader: View
-    private lateinit var btnRefreshScan: TextView
+    /** 「重新扫描」按钮容器（含旋转箭头与文案）；点击区域覆盖整个按钮，而不只是文字 */
+    private lateinit var btnRefreshScan: View
     private lateinit var etPinCode: EditText
     private lateinit var btnConnectPc: Button
     private lateinit var tvToggleManualIp: TextView
@@ -287,7 +288,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnRefreshScan.setOnClickListener {
-            Toast.makeText(this, "正在重新搜索局域网电脑...", Toast.LENGTH_SHORT).show()
+            // 点击反馈改为「箭头旋转 + 文案切换为正在扫描中」(见 ScanRefreshController)；
+            // 原先在此弹出的底部 Toast 与旋转变达的是同一件事，重复提示既遮挡视线又转瞬即逝，已移除。
+            ScanRefreshController.onScanClicked(this)
             val service = SyncForegroundService.instance
             if (service != null) {
                 service.triggerRescan()

@@ -32,6 +32,13 @@ pub struct FilePrepare {
     pub file_size: u64,
     pub mime_type: Option<String>,
     pub sender_id: Option<String>,
+    /// 发送方给出的整文件 SHA-256（可选，老版本发送端不带该字段）。
+    ///
+    /// 有了它，接收端才能在**传输开始前**判断目标目录里是否已经有同一个文件，
+    /// 从而跳过整轮分块传输；缺失时退化为「照常传输」。
+    /// 作为可选字段新增是刻意的：协议只增不改，老客户端仍能正常互传。
+    #[serde(default)]
+    pub file_hash: Option<String>,
 }
 
 /// 文件传输完成信号
@@ -53,6 +60,11 @@ struct IncomingTransfer {
     temp_path: PathBuf,
     /// 落盘后的目标路径（尚未去重）
     final_path: PathBuf,
+    /// 去重命中：目标目录已存在「同名 + 同大小 + 同哈希」的文件，直接复用它的路径。
+    ///
+    /// 命中时仍然照常登记传输并留一个空的临时文件，这样即便发送端没识别 `already_exists`
+    /// 而继续推送分块，每个分块也能被正常接收、不会中途报错；完成时直接丢弃临时文件。
+    dedup_hit: Option<PathBuf>,
 }
 
 /// 发出文件的发送状态。
@@ -81,8 +93,10 @@ pub struct FileTransferManager {
 
 impl FileTransferManager {
     pub fn new() -> Self {
-        // 使用环境变量手动定位下载目录，避免额外依赖 dirs crate
-        let downloads_dir = if let Ok(userprofile) = std::env::var("USERPROFILE") {
+        // 用环境变量手动定位下载目录，避免引入 dirs 依赖。
+        // 文件统一落在「下载目录/CrossClip」：与手机端默认的 Download/CrossClip 同名，
+        // 也避免收到的文件散落在下载根目录里跟别的东西混在一起。
+        let downloads_root = if let Ok(userprofile) = std::env::var("USERPROFILE") {
             PathBuf::from(userprofile).join("Downloads")
         } else if let Ok(homedrive) = std::env::var("HOMEDRIVE") {
             let homepath = std::env::var("HOMEPATH").unwrap_or_default();
@@ -90,6 +104,7 @@ impl FileTransferManager {
         } else {
             PathBuf::from(".").join("Downloads")
         };
+        let downloads_dir = downloads_root.join("CrossClip");
 
         Self {
             incoming: Arc::new(Mutex::new(HashMap::new())),
@@ -105,7 +120,12 @@ impl FileTransferManager {
 
     // ==================== 接收文件（手机 → 电脑） ====================
 
-    /// 处理文件准备消息：在下载目录创建临时文件并登记传输状态
+    /// 处理文件准备消息：登记传输状态，并顺带做一次「接收端去重」预检。
+    ///
+    /// ## 去重的开销模型（为什么是低开销版）
+    /// 只做「同名 + 同大小」两个近乎零成本的判定，两者都命中才为**这一个**文件流式算一次
+    /// SHA-256。绝不遍历整个目录逐个算哈希 —— 那样在大目录下会不可控地卡住请求线程。
+    /// 于是重复发送同一个文件可以瞬间完成，而误判的代价仅是一次单文件哈希。
     pub fn handle_prepare(&self, prepare: &FilePrepare, _current_pin: &str) -> Result<(), String> {
         let safe_filename = sanitize_filename(&prepare.filename);
         let temp_path = self.downloads_dir.join(format!("{}.part", prepare.file_id));
@@ -116,6 +136,22 @@ impl FileTransferManager {
         let _ = fs::remove_file(&temp_path);
         fs::write(&temp_path, b"").map_err(|e| format!("创建临时文件失败: {}", e))?;
 
+        // 发送端没带哈希（老版本客户端）时放弃去重，退化为正常传输
+        let dedup_hit = prepare
+            .file_hash
+            .as_deref()
+            .filter(|expected| !expected.is_empty())
+            .and_then(|expected| {
+                self.find_existing_duplicate(&final_path, prepare.file_size, expected)
+            });
+
+        if let Some(existing) = &dedup_hit {
+            println!(
+                "[FileTransfer] 目标目录已存在相同文件，接收完成后将直接复用: {}",
+                existing.display()
+            );
+        }
+
         let transfer = IncomingTransfer {
             filename: safe_filename,
             received_bytes: 0,
@@ -123,6 +159,7 @@ impl FileTransferManager {
             chunks_received: 0,
             temp_path,
             final_path,
+            dedup_hit,
         };
 
         self.incoming.lock().unwrap().insert(prepare.file_id.clone(), transfer);
@@ -132,6 +169,51 @@ impl FileTransferManager {
             prepare.filename, prepare.file_size
         );
         Ok(())
+    }
+
+    /// 目标路径上是否已有「大小相同且内容哈希一致」的文件；命中则返回该路径。
+    ///
+    /// 先比大小（读元数据，几乎零成本），只有大小一致才值得付出一次哈希。
+    fn find_existing_duplicate(
+        &self,
+        candidate: &PathBuf,
+        expected_size: u64,
+        expected_hash: &str,
+    ) -> Option<PathBuf> {
+        let metadata = fs::metadata(candidate).ok()?;
+        if !metadata.is_file() || metadata.len() != expected_size {
+            return None;
+        }
+        let actual_hash = crate::crypto::compute_file_hash(candidate).ok()?;
+        if actual_hash.eq_ignore_ascii_case(expected_hash) {
+            Some(candidate.clone())
+        } else {
+            None
+        }
+    }
+
+    /// 本次接收是否命中了去重。
+    /// 供 HTTP 层在 `prepare` 响应里告诉发送端「别再传分块了」。
+    pub fn is_dedup_hit(&self, file_id: &str) -> bool {
+        self.incoming
+            .lock()
+            .unwrap()
+            .get(file_id)
+            .map(|transfer| transfer.dedup_hit.is_some())
+            .unwrap_or(false)
+    }
+
+    /// 当前接收进度：`(已接收字节数, 总字节数估算)`，供 UI 绘制进度条。
+    ///
+    /// 总字节数按「分块数 × 分块大小」估算，最多比真实值多出一个分块 ——
+    /// 对进度条而言这点误差没有意义，却能省下在每个传输记录里再存一份精确大小。
+    pub fn incoming_progress(&self, file_id: &str) -> Option<(u64, u64)> {
+        self.incoming.lock().unwrap().get(file_id).map(|transfer| {
+            (
+                transfer.received_bytes,
+                transfer.total_chunks as u64 * CHUNK_SIZE as u64,
+            )
+        })
     }
 
     /// 处理文件分块（二进制密文，已解出为原始明文的字节由本函数解密后追加写入）
@@ -172,13 +254,32 @@ impl FileTransferManager {
     }
 
     /// 处理传输完成：流式校验哈希 → 重命名为最终文件（自动规避重名）
-    pub fn handle_complete(&self, complete: &FileComplete, _current_pin: &str) -> Result<PathBuf, String> {
+    /// 处理传输完成：命中过去重则直接复用已有文件，否则流式校验哈希后落盘。
+    ///
+    /// @return `(最终文件路径, 是否命中去重)`
+    pub fn handle_complete(
+        &self,
+        complete: &FileComplete,
+        _current_pin: &str,
+    ) -> Result<(PathBuf, bool), String> {
         let transfer = self
             .incoming
             .lock()
             .unwrap()
             .remove(&complete.file_id)
             .ok_or_else(|| format!("未知的文件传输 ID: {}", complete.file_id))?;
+
+        // 去重命中：目标目录里已经有同名、同大小、同内容的文件。
+        // 这里把收到的临时数据直接丢掉 —— 无论发送端是否识别了 `already_exists`
+        // 而跳过分块，这条路径都成立。
+        if let Some(existing) = transfer.dedup_hit {
+            let _ = fs::remove_file(&transfer.temp_path);
+            println!(
+                "[FileTransfer] 文件已存在，跳过落盘并复用: {}",
+                existing.display()
+            );
+            return Ok((existing, true));
+        }
 
         // 流式计算哈希：不把整个文件读进内存，GB 级文件也安全
         let actual_hash = crate::crypto::compute_file_hash(&transfer.temp_path)?;
@@ -198,7 +299,7 @@ impl FileTransferManager {
             transfer.filename,
             final_path.display()
         );
-        Ok(final_path)
+        Ok((final_path, false))
     }
 
     /// 取消接收并清理临时文件

@@ -54,12 +54,31 @@ class LocalHttpServer(
      * 这样本类无需持有 PIN 码，职责更单一。
      */
     interface FileTransferCallback {
-        fun onFilePrepareReceived(fileId: String, filename: String, fileSize: Long, mimeType: String, senderId: String): Boolean
+        /**
+         * @param fileHash 发送端给出的整文件 SHA-256；老版本电脑端可能传 null。
+         *                 有了它才能判定「目标目录里已经有同一个文件」。
+         */
+        fun onFilePrepareReceived(
+            fileId: String,
+            filename: String,
+            fileSize: Long,
+            mimeType: String,
+            senderId: String,
+            fileHash: String?
+        ): Boolean
 
         /** @param payload AES-GCM 密文（nonce||ciphertext||tag） */
         fun onFileChunkReceived(fileId: String, chunkIndex: Int, totalChunks: Int, payload: ByteArray): Pair<Int, Int>?
 
         fun onFileCompleteReceived(fileId: String, fileHash: String): String?
+
+        /**
+         * 本次接收是否命中了「目标目录已有同名同内容文件」的去重判定。
+         *
+         * 这里给默认实现是刻意的：万一某个实现忘了覆写，行为也只是退化成「照常传输」，
+         * 而不会编译不过或运行时报错。
+         */
+        fun isDedupHit(fileId: String): Boolean = false
     }
 
     private var fileTransferCallback: FileTransferCallback? = null
@@ -270,13 +289,22 @@ class LocalHttpServer(
                     val fileSize = json.optLong("file_size", 0)
                     val mimeType = json.optString("mime_type", "application/octet-stream")
                     val senderId = json.optString("sender_id", "电脑端")
+                    // 老版本电脑端不带 file_hash 字段，此时为 null，去重逻辑自动跳过
+                    val fileHash = json.optString("file_hash", "").takeIf { it.isNotEmpty() }
 
                     if (fileId.isNotEmpty()) {
                         DebugLogger.log("LOCAL_HTTP", "收到电脑端文件准备: $filename ($fileSize bytes)")
                         val accepted = fileTransferCallback
-                            ?.onFilePrepareReceived(fileId, filename, fileSize, mimeType, senderId) ?: true
+                            ?.onFilePrepareReceived(fileId, filename, fileSize, mimeType, senderId, fileHash) ?: true
                         if (accepted) {
-                            writeJson(out, 200, "{\"status\":\"ok\",\"file_id\":\"$fileId\"}", keepAlive)
+                            // 明确告知发送端「目标目录已有同一个文件」，让它一个分块都不用传
+                            val alreadyExists = fileTransferCallback?.isDedupHit(fileId) ?: false
+                            writeJson(
+                                out,
+                                200,
+                                "{\"status\":\"ok\",\"file_id\":\"$fileId\",\"already_exists\":$alreadyExists}",
+                                keepAlive
+                            )
                         } else {
                             writeJson(out, 503, "{\"error\":\"rejected\"}", keepAlive)
                         }

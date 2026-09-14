@@ -186,4 +186,43 @@ object HttpUploader {
             }
         })
     }
+
+    /**
+     * 告知电脑端「手机端已主动断开连接」。
+     *
+     * 电脑端的「已连接手机」原本只靠 600 秒心跳超时清理，用户点了断开后托盘还会继续挂
+     * 10 分钟。这里在断开时主动打一声招呼，电脑端收到即摘掉该设备的连接记录。
+     *
+     * 属于「尽力而为」：手机侧网络已不可用时静默失败即可，电脑端仍由 SSE 长连接结束
+     * 或心跳超时兜底 —— 差几秒不影响正确性，绝不能因为这次通知失败就卡住断开流程。
+     */
+    fun notifyPcDisconnected(
+        pcIp: String,
+        httpPort: Int = 18236,
+        pinCode: String,
+        deviceId: String = ""
+    ) {
+        if (pcIp.isEmpty() || pinCode.isEmpty()) return
+        val url = "http://$pcIp:$httpPort/disconnect"
+        val pinHash = CryptoUtil.computeHash(pinCode).substring(0, 16)
+        val json = JSONObject().apply {
+            put("pin_hash", pinHash)
+            put("device_id", deviceId)
+            put("timestamp", System.currentTimeMillis())
+        }.toString()
+        val requestBody = json.toRequestBody(JSON_MEDIA_TYPE)
+        val request = Request.Builder().url(url).post(requestBody).build()
+        DebugLogger.log("HTTP", "通知电脑端「本机已主动断开」: $url")
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                DebugLogger.log("HTTP", "通知电脑端断开失败（忽略，交由 SSE 断开/心跳超时兜底）: ${e.message}")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val code = response.code
+                response.close()
+                DebugLogger.log("HTTP", "已通知电脑端断开连接 (状态码: $code)")
+            }
+        })
+    }
 }

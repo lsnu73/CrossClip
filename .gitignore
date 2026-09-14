@@ -7,6 +7,8 @@ android/.idea/
 android/.kotlin/
 android/**/build/
 android/local.properties
+# Android Studio「Generate Signed APK」的默认输出目录：是构建产物，不是源码
+android/app/release/
 *.iml
 
 # Release binaries (except the two tracked below)

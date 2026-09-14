@@ -106,14 +106,31 @@
                         android:textStyle="bold"
                         android:textColor="@color/text_primary" />
 
-                    <TextView
+                    <LinearLayout
                         android:id="@+id/btn_refresh_scan"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="🔄 重新扫描"
-                        android:textSize="12sp"
-                        android:textColor="@color/primary"
-                        android:padding="4dp" />
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:padding="4dp">
+
+                        <ImageView
+                            android:id="@+id/iv_refresh_icon"
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:contentDescription="重新扫描"
+                            android:src="@drawable/ic_refresh_arrow" />
+
+                        <TextView
+                            android:id="@+id/tv_refresh_label"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="4dp"
+                            android:text="重新扫描"
+                            android:textSize="12sp"
+                            android:textColor="@color/primary" />
+                    </LinearLayout>
                 </LinearLayout>
 
                 <LinearLayout

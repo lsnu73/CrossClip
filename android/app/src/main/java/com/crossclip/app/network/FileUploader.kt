@@ -84,7 +84,7 @@ object FileUploader {
                 // ---------- 0. 流式计算整文件 SHA-256（不把文件读进内存） ----------
                 val fileHash = CryptoUtil.computeHashFile(file)
 
-                // ---------- 1. 发送文件准备消息 ----------
+                // ---------- 1. 发送文件准备消息（带上整文件哈希，供电脑端判定是否已有同一文件） ----------
                 val preparePayload = JSONObject().apply {
                     put("type", "FILE_PREPARE")
                     put("file_id", fileId)
@@ -92,10 +92,32 @@ object FileUploader {
                     put("file_size", fileSize)
                     put("mime_type", mimeType)
                     put("sender_id", deviceId)
+                    put("file_hash", fileHash)
                 }.toString()
 
-                if (!postJson("http://$pcIp:$httpPort/file/prepare", preparePayload)) {
+                val prepareResponse = postJson("http://$pcIp:$httpPort/file/prepare", preparePayload)
+                if (prepareResponse == null) {
                     onError("电脑端未响应文件准备请求")
+                    return@Thread
+                }
+
+                // 电脑端已有同名同内容的文件：一个分块都不用传。
+                //
+                // 但**结束信号仍然必须发** —— 电脑端靠它回收这次传输的记录、落定状态。
+                // 少了这一步，电脑端 incoming 表会把这条记录一直挂着，
+                // 而且它也就无法把「已存在」这一结果回复给我们。
+                if (prepareResponse.contains("\"already_exists\":true")) {
+                    DebugLogger.log(TAG, "电脑端已存在相同文件，跳过全部分块: $filename")
+                    val completePayload = JSONObject().apply {
+                        put("type", "FILE_COMPLETE")
+                        put("file_id", fileId)
+                        put("file_hash", fileHash)
+                    }.toString()
+                    if (postJson("http://$pcIp:$httpPort/file/complete", completePayload) == null) {
+                        onError("文件已存在，但结束信号发送失败")
+                        return@Thread
+                    }
+                    onSuccess("电脑端已有该文件，无需重复传输")
                     return@Thread
                 }
 
@@ -143,7 +165,7 @@ object FileUploader {
                     put("file_hash", fileHash)
                 }.toString()
 
-                if (!postJson("http://$pcIp:$httpPort/file/complete", completePayload)) {
+                if (postJson("http://$pcIp:$httpPort/file/complete", completePayload) == null) {
                     onError("文件已传输完毕，但完成校验未通过")
                     return@Thread
                 }
@@ -158,29 +180,36 @@ object FileUploader {
         }.apply { name = "CrossClip-FileUpload" }.start()
     }
 
-    /** 发送 JSON 请求体（同步阻塞，调用方需处于后台线程） */
-    private fun postJson(url: String, jsonBody: String): Boolean {
+    /** 发送 JSON 请求体（同步阻塞，调用方需处于后台线程）；成功返回响应体文本，失败返回 null */
+    private fun postJson(url: String, jsonBody: String): String? {
         return executeRequest(url, jsonBody.toRequestBody(JSON_MEDIA_TYPE), "/json")
     }
 
     /** 发送二进制请求体（同步阻塞） */
     private fun postBytes(url: String, data: ByteArray): Boolean {
-        return executeRequest(url, data.toRequestBody(BINARY_MEDIA_TYPE), "/binary")
+        return executeRequest(url, data.toRequestBody(BINARY_MEDIA_TYPE), "/binary") != null
     }
 
-    /** 统一执行 POST 请求并判断是否成功 */
-    private fun executeRequest(url: String, body: okhttp3.RequestBody, tag: String): Boolean {
+    /**
+     * 统一执行 POST 请求。
+     *
+     * 成功时把**响应体文本**一并返回：`prepare` 阶段要靠它读 `already_exists` 字段来决定
+     * 是否跳过整轮分块上传。失败（网络异常 / 非 2xx）返回 null。
+     */
+    private fun executeRequest(url: String, body: okhttp3.RequestBody, tag: String): String? {
         return try {
             val request = Request.Builder().url(url).post(body).build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     DebugLogger.log(TAG, "HTTP 请求返回错误 $tag: ${response.code}")
+                    null
+                } else {
+                    response.body?.string()
                 }
-                response.isSuccessful
             }
         } catch (e: Exception) {
             DebugLogger.log(TAG, "HTTP 请求异常 $tag: ${e.javaClass.simpleName}: ${e.message}")
-            false
+            null
         }
     }
 

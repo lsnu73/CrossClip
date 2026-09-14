@@ -22,6 +22,7 @@ import android.os.PowerManager
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import com.crossclip.app.R
 import com.crossclip.app.crypto.CryptoUtil
 import com.crossclip.app.network.HttpUploader
 import com.crossclip.app.network.LanDiscovery
@@ -71,6 +72,20 @@ class SyncForegroundService : Service() {
 
         /** 文件传输通知 ID（与常驻通知错开，避免互相覆盖） */
         const val NOTIFICATION_ID_FILE = 2002
+
+        /**
+         * 所有通知共用的**小图标**。
+         *
+         * 这里要的是「图案」，不是「图标」：Android 会把通知小图标当成 alpha 蒙版来渲染 ——
+         * 只取形状、丢弃颜色。而 `@mipmap/ic_launcher` 是自适应图标的**完整图**
+         * （前景层 + 不透明背景层），整张都不透明，套上蒙版就是一坨**实心方块**；
+         * `ic_launcher_foreground` 是透明底 + 图案的那一层，蒙版后才是应用图标本身的形状剪影。
+         *
+         * 所以换应用图标时要同步更新的是这张前景图，**不要**顺手改成 `@mipmap/ic_launcher`。
+         * 分享通知（com.crossclip.app.receiver.ShareReceiveActivity）复用同一常量，
+         * 保证通知栏里所有 CrossClip 通知看起来来自同一个 App。
+         */
+        val NOTIFICATION_SMALL_ICON = R.drawable.ic_launcher_foreground
 
         const val ACTION_MANUAL_SEND = "com.crossclip.app.ACTION_MANUAL_SEND"
         const val ACTION_WATCHDOG = "com.crossclip.app.ACTION_WATCHDOG"
@@ -136,6 +151,16 @@ class SyncForegroundService : Service() {
     /** 是否开启「持续自动搜索电脑」。关闭后需用户手动点击「重新扫描」 */
     private var autoSearchEnabled: Boolean = true
 
+    /**
+     * 用户是否刚手动点过「断开连接」。
+     *
+     * 断开后扫描线程即使因时序原因多跑了一轮、或 mDNS 恰好回调了一次设备，
+     * [onDeviceDiscovered] 也绝不能顺手把连接自动接回去 —— 用户刚刚明确表达过「别连」。
+     * 用户主动发起连接（重新扫描 / 输 PIN / 选设备 / 开自动搜索）时清除该标志。
+     */
+    @Volatile
+    private var manualDisconnected = false
+
     @Volatile
     private var selfTestWriteInProgress = false
     private var wakeLock: PowerManager.WakeLock? = null
@@ -154,6 +179,18 @@ class SyncForegroundService : Service() {
     /** 最近一次上报的接收进度百分比，用于通知节流（-1 表示尚未开始） */
     @Volatile
     private var lastFileReceiveProgress = -1
+
+    /**
+     * 当前文件传输是否已进入终态（完成 / 失败）。
+     *
+     * 分块进度通知是 `setOngoing(true)` 的「进行中」卡片，而完成通知同样要经 `mainHandler.post`
+     * 异步投递，两者存在竞态：分块数多的大文件（实测 .apk / .rar 必现）会让最后那条
+     * 「进度 100%」的通知落在完成通知之后并覆盖它，而 ongoing 通知不会自动消失，
+     * 于是通知栏永久停在「正在接收文件 / 进度: 100%」。
+     * 因此终态一旦确定就置位该标志，丢弃一切迟到的进度刷新。
+     */
+    @Volatile
+    private var fileTransferSettled = false
 
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
         DebugLogger.log("CLIP_SYS", "原生 PrimaryClipChangedListener 触发")
@@ -208,20 +245,56 @@ class SyncForegroundService : Service() {
         // 设置文件传输回调（接收电脑端推送的文件）
         localHttpServer?.setFileTransferCallback(object : LocalHttpServer.FileTransferCallback {
 
-            /** 准备接收：在 App 私有缓存建临时文件，并弹出「正在接收」通知 */
+            /** 准备接收：先做去重判定，再决定弹「正在接收」还是直接判完成 */
             override fun onFilePrepareReceived(
-                fileId: String, filename: String, fileSize: Long, mimeType: String, senderId: String
+                fileId: String,
+                filename: String,
+                fileSize: Long,
+                mimeType: String,
+                senderId: String,
+                fileHash: String?
             ): Boolean {
                 DebugLogger.log("FILE_RECEIVE", "收到电脑端文件准备: $filename ($fileSize bytes)")
                 lastFileReceiveProgress = -1
-                mainHandler.post {
-                    updateNotification("📥 正在接收文件: $filename")
-                    showFileReceiveNotification(filename, fileSize)
+                // 新一轮传输开始，撤销上一轮可能已置位的终态标记
+                fileTransferSettled = false
+
+                // 顺序很重要：必须**先**做去重判定，再决定是否弹「正在接收」。
+                // 命中去重时发送端一个分块都不会发，紧接着就发 complete 收尾 ——
+                // 这里若仍先弹「正在接收」，那条通知就会空转（不定进度条表现为 0→100 循环）。
+                //
+                // 刻意**不**在 prepare 阶段直接判完成：那条路径会提前把传输记录移除，
+                // 使 HTTP 层随后查不到去重结果、回给发送端 already_exists=false，
+                // 结果是发送端照常发来整份文件而接收端已经没了记录。
+                val accepted = FileReceiver.prepareReceive(
+                    applicationContext, fileId, filename, fileSize, fileHash
+                )
+
+                if (accepted && FileReceiver.isDedupHit(fileId)) {
+                    DebugLogger.log("FILE_RECEIVE", "目标目录已有同一文件，等待发送端结束信号")
+                    return accepted
                 }
-                return FileReceiver.prepareReceive(applicationContext, fileId, filename, fileSize)
+
+                // 通知直接在本线程发出，不经主线程转发（原因见 onFileChunkReceived 的注释）
+                updateNotification("📥 正在接收文件: $filename")
+                showFileReceiveNotification(filename, fileSize)
+                return accepted
             }
 
-            /** 接收分块：payload 为二进制密文，此处解密后写入临时文件 */
+            /** 本次接收是否已判定为「目标目录已有同一文件」（供 HTTP 层回告发送端） */
+            override fun isDedupHit(fileId: String): Boolean = FileReceiver.isDedupHit(fileId)
+
+            /**
+             * 接收分块：payload 为二进制密文，此处解密后写入临时文件。
+             *
+             * ### 为什么通知必须在这个线程上**同步**发出
+             * 早先的实现把每次通知都 `mainHandler.post{}` 转投到主线程。这让「进度通知」与
+             * 「完成通知」的实际投递顺序脱离了**串行处理这条 HTTP 连接**的传输线程：
+             * 一帧迟到的「进度 100%」可能落在完成通知之后，而它是 `setOngoing(true)` 的，
+             * 于是通知栏永久停在「正在接收文件 / 进度: 100%」。
+             * `NotificationManager.notify` 本身线程安全，绕道主线程纯属多余的间接层 ——
+             * 去掉之后，通知的落地顺序严格等于请求的处理顺序。
+             */
             override fun onFileChunkReceived(
                 fileId: String, chunkIndex: Int, totalChunks: Int, payload: ByteArray
             ): Pair<Int, Int>? {
@@ -232,12 +305,18 @@ class SyncForegroundService : Service() {
                         val (received, total) = result
                         if (total > 0) {
                             val progress = (received * 100) / total
-                            // 节流：进度每跨越 5% 才刷新一次通知，避免 1MB 分块高频刷屏造成卡顿
-                            if (progress >= lastFileReceiveProgress + 5 || progress == 100) {
+                            val willUpdate = progress >= lastFileReceiveProgress + 5 || progress == 100
+                            val settled = fileTransferSettled
+                            DebugLogger.log("DIAG_CHUNK", "chunk=$chunkIndex/$totalChunks progress=$progress lastProg=$lastFileReceiveProgress willUpdate=$willUpdate settled=$settled thread=${Thread.currentThread().name}")
+                            if (willUpdate) {
                                 lastFileReceiveProgress = progress
-                                mainHandler.post {
-                                    updateNotification("📥 接收文件中: $progress%")
+                                if (!settled) {
+                                    DebugLogger.log("DIAG_CHUNK", "→ 发送进度通知 progress=$progress (ongoing=true) BEFORE notify")
                                     showFileReceiveProgressNotification(progress)
+                                    DebugLogger.log("DIAG_CHUNK", "→ 进度通知已发送 progress=$progress (ongoing=true) AFTER notify")
+                                    updateNotification("📥 接收文件中: $progress%")
+                                } else {
+                                    DebugLogger.log("DIAG_CHUNK", "→ 跳过进度通知（settled=true）")
                                 }
                             }
                         }
@@ -251,20 +330,22 @@ class SyncForegroundService : Service() {
 
             /** 接收完成：校验哈希并落盘到用户配置的目录 */
             override fun onFileCompleteReceived(fileId: String, fileHash: String): String? {
+                DebugLogger.log("DIAG_COMPLETE", "→ onFileCompleteReceived 开始 thread=${Thread.currentThread().name} settled=$fileTransferSettled")
+                // 先钉住终态：此后所有迟到的分块进度刷新都会被上面的判断丢弃
+                fileTransferSettled = true
                 val result = FileReceiver.completeReceive(applicationContext, fileId, fileHash)
                 if (result != null) {
                     DebugLogger.log("FILE_RECEIVE", "文件接收完成: $result")
-                    mainHandler.post {
-                        updateNotification("✅ 文件接收完成")
-                        showFileReceiveCompleteNotification(result)
-                    }
+                    DebugLogger.log("DIAG_COMPLETE", "→ 即将调用 showFileReceiveCompleteNotification")
+                    showFileReceiveCompleteNotification(result)
+                    DebugLogger.log("DIAG_COMPLETE", "→ showFileReceiveCompleteNotification 已返回")
+                    updateNotification("✅ 文件接收完成")
                 } else {
                     DebugLogger.log("FILE_RECEIVE", "文件接收失败: 哈希不匹配或数据不完整")
-                    mainHandler.post {
-                        updateNotification("❌ 文件接收失败")
-                        showFileReceiveFailedNotification()
-                    }
+                    showFileReceiveFailedNotification()
+                    updateNotification("❌ 文件接收失败")
                 }
+                DebugLogger.log("DIAG_COMPLETE", "→ onFileCompleteReceived 结束")
                 return result
             }
         })
@@ -591,6 +672,8 @@ class SyncForegroundService : Service() {
      */
     fun setAutoSearchEnabled(enabled: Boolean) {
         autoSearchEnabled = enabled
+        // 重新开启自动搜索等同于用户主动要求「继续找电脑」，解除手动断开的抑制
+        manualDisconnected = false
         getSharedPreferences("cross_clip_config", MODE_PRIVATE)
             .edit()
             .putBoolean("auto_search_enabled", enabled)
@@ -642,6 +725,8 @@ class SyncForegroundService : Service() {
      */
     fun triggerRescan() {
         DebugLogger.log("DISCOVERY", "用户主动触发局域网重新扫描，切断旧连接并清空全部缓存")
+        // 手动断开后的「重新扫描」是用户主动发起的，解除抑制恢复自动连接
+        manualDisconnected = false
         connectTokenCounter.incrementAndGet()
         sseClient.disconnect()
         connectionState = 0
@@ -686,6 +771,11 @@ class SyncForegroundService : Service() {
     }
 
     private fun onDeviceDiscovered(devId: String, name: String, ip: String, httpPort: Int) {
+        if (manualDisconnected) {
+            // 用户刚手动断开：忽略任何扫描结果，不自动重连（要连由用户点「重新扫描」发起）
+            DebugLogger.log("DISCOVERY", "已手动断开连接，忽略扫描结果: $name ($ip)")
+            return
+        }
         val now = System.currentTimeMillis()
         
         // 物理 IP 强力归并去重：检索是否存在相同物理 IP 或相同 ID 的已有记录
@@ -793,6 +883,8 @@ class SyncForegroundService : Service() {
     fun selectTargetDevice(device: DiscoveredDevice) {
         if (currentTargetDeviceId == device.deviceId && currentPcIp == device.ip && connectionState == 1) return
         DebugLogger.log("SVC_ACTION", "切换目标电脑: ${device.name} (${device.ip})")
+        // 用户主动选择设备，解除手动断开的抑制
+        manualDisconnected = false
 
         // 优雅切断旧连接通道，废弃旧事务
         connectTokenCounter.incrementAndGet()
@@ -822,13 +914,42 @@ class SyncForegroundService : Service() {
     }
 
     fun disconnectCurrentPc() {
-        DebugLogger.log("SVC_ACTION", "手动断开与电脑连接")
-        connectTokenCounter.incrementAndGet()
-        sseClient.disconnect()
+        DebugLogger.log("SVC_ACTION", "手动断开与电脑连接：停止设备搜索，等待用户手动「重新扫描」")
+        // 1. 先落「已断开」状态，再关连接。
+        //    顺序不能反：sseClient.disconnect() 会同步回调 onConnectionChanged(false)，
+        //    那里用 connectionState == 1 判断是否属于「已连接 → 断开」跳变；此刻若仍是 1，
+        //    就会走 onPcDisconnected() 把扫描线程重新拉起来，用户刚点的断开立刻失效。
         connectionState = 0
+        // 抑制自动重连：扫描线程可能在 stopDiscovery() 生效前又跑完一轮
+        manualDisconnected = true
+        // 作废在途握手，避免旧回调把状态改回「已连接」
+        connectTokenCounter.incrementAndGet()
         lanDiscovery.isConnected = false
-        // 手动断开同样按「掉线」处理：重置 5/15 分钟搜索时间窗并刷新通知栏文案
-        onPcDisconnected()
+
+        // 2. 主动告知电脑端，让它立刻摘掉「已连接手机」，不必等 600 秒心跳超时。
+        //    必须在清空 currentPcIp / pinCode 之前发起。
+        HttpUploader.notifyPcDisconnected(currentPcIp, currentHttpPort, pinCode, deviceId)
+
+        // 3. 关闭出站长连接（此后心跳因 currentPcIp 已清空而不再上报，不会再注册回来）
+        currentPcIp = ""
+        currentPcName = "未连接"
+        sseClient.disconnect()
+
+        // 4. 停止设备搜索：UDP 广播 / 子网探测 / mDNS 全部停下。
+        //    与「自动搜索 15 分钟超时」是同一个终态 —— 通知栏改口为「搜索已暂停」，
+        //    用户想重新连就点应用里的「重新扫描」。
+        try {
+            nsdHelper.stopDiscovery()
+        } catch (e: Exception) {
+            DebugLogger.log("SVC_ACTION", "手动断开时停止 mDNS 失败: ${e.message}")
+        }
+        try {
+            lanDiscovery.stopDiscovery()
+        } catch (e: Exception) {
+            DebugLogger.log("SVC_ACTION", "手动断开时停止局域网扫描失败: ${e.message}")
+        }
+
+        mainHandler.post { updateNotification(statusTextForNotification()) }
     }
 
     fun connectWithPin(
@@ -837,6 +958,8 @@ class SyncForegroundService : Service() {
         httpPort: Int = currentHttpPort,
         callback: (success: Boolean, statusCode: Int, name: String?) -> Unit
     ) {
+        // 用户手动发起配对，解除「断开后不再自动重连」的抑制
+        manualDisconnected = false
         val token = connectTokenCounter.incrementAndGet()
         currentPcIp = ip
         pinCode = pin
@@ -1062,7 +1185,7 @@ class SyncForegroundService : Service() {
             val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
                 .setContentTitle("📥 正在接收文件")
                 .setContentText("$filename ($sizeStr)")
-                .setSmallIcon(android.R.drawable.ic_menu_save)
+                .setSmallIcon(NOTIFICATION_SMALL_ICON)
                 .setProgress(100, 0, true)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -1082,13 +1205,15 @@ class SyncForegroundService : Service() {
             val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
                 .setContentTitle("📥 正在接收文件")
                 .setContentText("进度: $progress%")
-                .setSmallIcon(android.R.drawable.ic_menu_save)
+                .setSmallIcon(NOTIFICATION_SMALL_ICON)
                 .setProgress(100, progress, false)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
+            DebugLogger.log("DIAG_NOTIFY", "nm.notify(PROGRESS) ID=$NOTIFICATION_ID_FILE ongoing=true progress=$progress% thread=${Thread.currentThread().name}")
             nm.notify(NOTIFICATION_ID_FILE, notification)
+            DebugLogger.log("DIAG_NOTIFY", "nm.notify(PROGRESS) 已返回")
         } catch (e: Exception) {
             DebugLogger.log("SVC_NOTIFY", "更新文件接收进度通知失败: ${e.message}")
         }
@@ -1096,23 +1221,58 @@ class SyncForegroundService : Service() {
 
     /**
      * 显示文件接收完成通知。
+     *
+     * 点击通知会打开「接收文件保存目录」（经 `OpenSaveDirActivity` 中转）：
+     * 用户刚收到文件，最自然的下一步就是去看它落在哪，直接给出入口比只展示一段路径更好用。
      * @param savedPath 实际落盘路径（默认目录为绝对路径，自定义目录为「目录名/文件名」）
      */
     private fun showFileReceiveCompleteNotification(savedPath: String) {
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+
+        // 「点击通知打开保存目录」单独 try：它一旦抛异常（个别 ROM 会对指向显式组件的
+        // PendingIntent 做额外校验），绝不能连带把这条「完成通知」一起吞掉 ——
+        // 那种情况下用户看到的就是永远停在最后一条进度通知，即「正在接收文件 / 进度: 100%」。
+        val openDirPendingIntent = try {
+            val openDirIntent = Intent(this, com.crossclip.app.ui.OpenSaveDirActivity::class.java)
+            PendingIntent.getActivity(
+                this,
+                2101,
+                openDirIntent,
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+        } catch (e: Exception) {
+            DebugLogger.log("SVC_NOTIFY", "创建「打开保存目录」PendingIntent 失败，降级为不可点击: ${e.message}", e)
+            null
+        }
+
         try {
-            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-            val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
+            val builder = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
                 .setContentTitle("✅ 文件接收完成")
-                .setContentText("已保存到: $savedPath")
+                .setContentText(
+                    if (openDirPendingIntent != null) {
+                        "已保存到: $savedPath（点击打开所在文件夹）"
+                    } else {
+                        "已保存到: $savedPath"
+                    }
+                )
                 .setStyle(NotificationCompat.BigTextStyle().bigText("已保存到: $savedPath"))
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setSmallIcon(NOTIFICATION_SMALL_ICON)
+                // 显式收掉上一帧残留的进度条：不写这一句时是否残留取决于各 ROM 的替换实现
+                .setProgress(0, 0, false)
                 .setAutoCancel(true)
                 .setOngoing(false)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build()
-            nm.notify(NOTIFICATION_ID_FILE, notification)
+
+            if (openDirPendingIntent != null) {
+                builder.setContentIntent(openDirPendingIntent)
+            }
+
+            DebugLogger.log("DIAG_NOTIFY", "nm.notify(COMPLETE) ID=$NOTIFICATION_ID_FILE ongoing=false thread=${Thread.currentThread().name}")
+            nm.notify(NOTIFICATION_ID_FILE, builder.build())
+            DebugLogger.log("DIAG_NOTIFY", "nm.notify(COMPLETE) 已返回")
+            DebugLogger.log("SVC_NOTIFY", "已发出「文件接收完成」通知: $savedPath")
         } catch (e: Exception) {
-            DebugLogger.log("SVC_NOTIFY", "显示文件接收完成通知失败: ${e.message}")
+            DebugLogger.log("SVC_NOTIFY", "显示文件接收完成通知失败: ${e.message}", e)
         }
     }
 
@@ -1125,7 +1285,7 @@ class SyncForegroundService : Service() {
             val notification = NotificationCompat.Builder(this, CHANNEL_ID_FILE)
                 .setContentTitle("❌ 文件接收失败")
                 .setContentText("传输中断或校验未通过，请重新发送")
-                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setSmallIcon(NOTIFICATION_SMALL_ICON)
                 .setAutoCancel(true)
                 .setOngoing(false)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -1196,7 +1356,7 @@ class SyncForegroundService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("CrossClip 剪贴板互传")
             .setContentText(status)
-            .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setSmallIcon(NOTIFICATION_SMALL_ICON)
             .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)

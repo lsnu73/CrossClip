@@ -30,9 +30,9 @@
     <application
         android:name=".CrossClipApp"
         android:allowBackup="true"
-        android:icon="@android:drawable/ic_menu_share"
+        android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:roundIcon="@android:drawable/ic_menu_share"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:theme="@style/Theme.CrossClip"
@@ -55,6 +55,17 @@
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
             android:noHistory="true"
+            android:launchMode="singleInstance" />
+
+        <!-- 「文件接收完成」通知的点击目标：打开接收文件保存目录后立即自我结束。
+             必须由 Activity 承接，因为保存目录的打开逻辑需要 Activity 上下文才能调起文件管理器。 -->
+        <activity
+            android:name=".ui.OpenSaveDirActivity"
+            android:exported="false"
+            android:theme="@style/Theme.CrossClip.Transparent"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
             android:launchMode="singleInstance" />
 
         <!-- Shizuku 服务绑定 Provider -->
@@ -84,10 +95,12 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice|dataSync" />
 
-        <!-- 控制中心快捷磁贴 -->
+        <!-- 控制中心快捷磁贴。图标与应用图标同源：磁贴显示的是彩色图标，
+             与通知小图标走的是两条不同的渲染路径 —— 后者必须用图案层（含 alpha 蒙版），
+             见 SyncForegroundService.NOTIFICATION_SMALL_ICON 的说明。 -->
         <service
             android:name=".tile.SendClipTileService"
-            android:icon="@android:drawable/ic_menu_send"
+            android:icon="@mipmap/ic_launcher"
             android:label="@string/tile_label"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
             android:exported="true">

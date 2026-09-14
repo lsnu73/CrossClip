@@ -10,8 +10,10 @@ mod clipboard;
 mod config;
 mod crypto;
 mod file_transfer;
+mod icon;
 mod ip_util;
 mod mdns;
+mod progress_window;
 mod server;
 mod udp_discovery;
 
@@ -21,7 +23,6 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use windows_sys::Win32::Foundation::*;
-use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::Threading::*;
@@ -139,11 +140,14 @@ impl AppState {
 
         // 在后台线程中执行文件发送
         std::thread::spawn(move || {
+            // 说明：从这一步起，所有状态反馈都走自绘浮窗（progress_window），
+            // 不再使用托盘气泡通知 —— 两者并存会把同一件事提示两遍。
+
             // 1. 读取文件并创建发送任务
             let transfer = match file_manager.prepare_outgoing(&file_path) {
                 Ok(t) => t,
                 Err(e) => {
-                    show_balloon_tip(hwnd_isize as HWND, "文件发送失败", &format!("读取文件失败: {}", e));
+                    progress_window::finish("文件发送失败", &format!("读取文件失败: {}", e), false);
                     return;
                 }
             };
@@ -151,7 +155,6 @@ impl AppState {
             let file_id = transfer.file_id.clone();
             let filename = transfer.filename.clone();
             let file_size = transfer.file_size;
-            let total_chunks = transfer.total_chunks;
             let file_hash = file_manager.get_file_hash(&file_id).unwrap_or_default();
 
             // 2. 获取已连接手机的 IP 和端口
@@ -161,7 +164,7 @@ impl AppState {
             let (phone_ip, phone_port) = match phone_peer {
                 Some(p) => (p.ip.clone(), p.port),
                 None => {
-                    show_balloon_tip(hwnd_isize as HWND, "文件发送失败", "未找到已连接的手机设备");
+                    progress_window::finish("文件发送失败", "未找到已连接的手机设备", false);
                     file_manager.cleanup_outgoing(&file_id);
                     return;
                 }
@@ -169,18 +172,13 @@ impl AppState {
 
             let current_pin = pin_code.read().unwrap().clone();
 
-            // 显示开始发送提示
-            show_balloon_tip(
-                hwnd_isize as HWND,
-                "开始发送文件",
-                &format!("{} ({} bytes) -> 手机", filename, file_size),
-            );
-
             // 3. 通过**单条复用连接**发送整个文件（prepare → 分块×N → complete）
             let sender_id = {
                 let state = GLOBAL_STATE.lock().unwrap();
                 state.as_ref().map(|s| s.device_id.clone()).unwrap_or_default()
             };
+
+            progress_window::show_progress("正在发送文件到手机", &filename, file_size);
 
             let send_result = server::send_file_to_phone(
                 &phone_ip,
@@ -191,7 +189,7 @@ impl AppState {
                 &file_hash,
                 &sender_id,
                 |sent, total| {
-                    // 每块完成时刷新托盘提示的进度百分比
+                    // 每块完成时同步刷新托盘提示与浮窗进度
                     file_manager.update_send_progress(&file_id, sent);
                     let progress = if total > 0 { sent * 100 / total } else { 100 };
                     update_tray_tooltip(
@@ -201,19 +199,31 @@ impl AppState {
                         0,
                         false,
                     );
+                    progress_window::update_progress(sent as u64, total as u64);
                 },
             );
 
             match send_result {
-                Ok(()) => {
-                    show_balloon_tip(
-                        hwnd_isize as HWND,
+                Ok(server::SendOutcome::Sent) => {
+                    progress_window::finish(
                         "文件发送完成",
-                        &format!("{} 已成功发送到手机", filename),
+                        &format!(
+                            "{} 已发送到手机 ({})",
+                            filename,
+                            progress_window::format_size(file_size)
+                        ),
+                        true,
+                    );
+                }
+                Ok(server::SendOutcome::SkippedExisting) => {
+                    progress_window::finish(
+                        "已跳过：手机端已有该文件",
+                        &format!("{} 内容一致，未重复传输", filename),
+                        true,
                     );
                 }
                 Err(e) => {
-                    show_balloon_tip(hwnd_isize as HWND, "文件发送失败", &e);
+                    progress_window::finish("文件发送失败", &e, false);
                 }
             }
 
@@ -415,28 +425,10 @@ fn open_file_picker(hwnd: HWND) -> Option<String> {
     }
 }
 
-/// 显示系统托盘气球通知
-fn show_balloon_tip(hwnd: HWND, title: &str, message: &str) {
-    unsafe {
-        let title_wide = to_wide(title);
-        let msg_wide = to_wide(message);
-
-        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
-        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-        nid.hWnd = hwnd;
-        nid.uID = 1;
-        nid.uFlags = NIF_INFO;
-
-        let title_len = title_wide.len().min(nid.szInfoTitle.len() - 1);
-        std::ptr::copy_nonoverlapping(title_wide.as_ptr(), nid.szInfoTitle.as_mut_ptr(), title_len);
-
-        let msg_len = msg_wide.len().min(nid.szInfo.len() - 1);
-        std::ptr::copy_nonoverlapping(msg_wide.as_ptr(), nid.szInfo.as_mut_ptr(), msg_len);
-
-        nid.dwInfoFlags = NIIF_INFO;
-        Shell_NotifyIconW(NIM_MODIFY, &nid);
-    }
-}
+// 说明：这里原本有一个 show_balloon_tip()（系统托盘气泡通知）。
+// 文件传输的状态呈现统一改走自绘浮窗（progress_window）后它已被删除 ——
+// 系统气泡与浮窗无法合并，两套并存只会把同一件事提示两遍。
+// 托盘图标本身（Shell_NotifyIcon）不受影响，仍在 main() 中注册与更新。
 
 fn is_auto_start_enabled() -> bool {
     unsafe {
@@ -551,101 +543,13 @@ fn update_tray_tooltip(hwnd: HWND, pin: &str, ip: &str, port: u16, auto_sync: bo
     }
 }
 
-/// 动态创建精致美观的剪贴板互传图标 (天蓝板夹 + 白色互传线，适配 Windows 任务栏)
+/// 创建托盘图标：直接取嵌入的多尺寸 ICO 里 32×32 的那一份。
+///
+/// 旧实现是用 GDI 逐块 `FillRect` 手绘一个 32×32 的剪贴板图案，只能做出硬边色块、
+/// 谈不上抗锯齿；现在统一改用与手机端同源的位图图标 ——
+/// 托盘、任务栏与 exe 文件属性里看到的是同一张图。
 unsafe fn create_crossclip_tray_icon() -> HICON {
-    let hdc_screen = GetDC(null_mut());
-    let hdc_mem = CreateCompatibleDC(hdc_screen);
-    let hdc_mask = CreateCompatibleDC(hdc_screen);
-
-    let hbm_color = CreateCompatibleBitmap(hdc_screen, 32, 32);
-    let hbm_mask = CreateBitmap(32, 32, 1, 1, null_mut());
-
-    let old_color = SelectObject(hdc_mem, hbm_color);
-    let old_mask = SelectObject(hdc_mask, hbm_mask);
-
-    let black_brush = CreateSolidBrush(0x000000);
-    let white_brush = CreateSolidBrush(0xFFFFFF);
-
-    // 1. 初始化背景透明
-    let full_rect = RECT {
-        left: 0,
-        top: 0,
-        right: 32,
-        bottom: 32,
-    };
-    FillRect(hdc_mask, &full_rect, white_brush);
-    FillRect(hdc_mem, &full_rect, black_brush);
-
-    // 2. 剪贴板主体板身 (天蓝色 #0284C7 -> BGR 0xC78402)
-    let clip_brush = CreateSolidBrush(0xC78402);
-    let clip_rect = RECT {
-        left: 5,
-        top: 6,
-        right: 27,
-        bottom: 30,
-    };
-    FillRect(hdc_mem, &clip_rect, clip_brush);
-    FillRect(hdc_mask, &clip_rect, black_brush);
-
-    // 3. 顶部金属夹扣
-    let top_clip_brush = CreateSolidBrush(0xE2E8F0); // 银白色
-    let top_clip_rect = RECT {
-        left: 10,
-        top: 2,
-        right: 22,
-        bottom: 8,
-    };
-    FillRect(hdc_mem, &top_clip_rect, top_clip_brush);
-    FillRect(hdc_mask, &top_clip_rect, black_brush);
-
-    // 4. 白色横线与互传标识
-    let line_brush = CreateSolidBrush(0xFFFFFF);
-    let line1 = RECT {
-        left: 9,
-        top: 12,
-        right: 23,
-        bottom: 14,
-    };
-    let line2 = RECT {
-        left: 9,
-        top: 17,
-        right: 23,
-        bottom: 19,
-    };
-    let line3 = RECT {
-        left: 9,
-        top: 22,
-        right: 18,
-        bottom: 24,
-    };
-    FillRect(hdc_mem, &line1, line_brush);
-    FillRect(hdc_mem, &line2, line_brush);
-    FillRect(hdc_mem, &line3, line_brush);
-
-    SelectObject(hdc_mem, old_color);
-    SelectObject(hdc_mask, old_mask);
-    DeleteDC(hdc_mem);
-    DeleteDC(hdc_mask);
-    ReleaseDC(null_mut(), hdc_screen);
-
-    DeleteObject(black_brush);
-    DeleteObject(white_brush);
-    DeleteObject(clip_brush);
-    DeleteObject(top_clip_brush);
-    DeleteObject(line_brush);
-
-    let icon_info = ICONINFO {
-        fIcon: 1,
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: hbm_mask,
-        hbmColor: hbm_color,
-    };
-
-    let icon = CreateIconIndirect(&icon_info);
-    DeleteObject(hbm_color);
-    DeleteObject(hbm_mask);
-    icon
+    icon::load_app_icon(32)
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -655,6 +559,11 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        progress_window::WM_PROGRESS_TICK => {
+            // 文件传输进度由工作线程投递到主线程刷新：窗口只能在创建它的线程上操作
+            progress_window::on_ui_tick();
+            0
+        }
         WM_COPYDATA => {
             // 收到来自「右键菜单新进程」的文件路径投递，转交发送流程
             unsafe {
@@ -990,6 +899,9 @@ fn main() {
 
         // 注册 Win32 系统剪贴板格式监听器至主窗口
         AddClipboardFormatListener(hwnd);
+
+        // 让 HTTP 处理线程也能刷新文件传输进度浮窗（那些线程拿不到这个窗口句柄）
+        progress_window::init(hwnd);
 
         // 创建现代高清剪贴板互传图标
         let h_icon = create_crossclip_tray_icon();
