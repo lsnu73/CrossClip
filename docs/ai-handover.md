@@ -21,6 +21,12 @@
 | 3 | [`docs/engineering-rules.md`](engineering-rules.md) | 具体工程约束(保活/心跳/生命周期) |
 | 4 | [`README.md`](../README.md) | 用户视角的功能与目录结构 |
 
+另有**专题文档**, 按需查阅(不是必读, 但碰到对应主题时必须看):
+
+| 文档 | 什么时候看 |
+| :--- | :--- |
+| [`docs/app-icons.md`](app-icons.md) | 要改应用图标 / 通知图标 / 托盘图标时 —— 双端共 7 处呈现, 极易漏改 |
+
 ### 0.2 改动前的硬性检查清单
 
 任何修改都必须先过一遍这张表, 有任一项命中就必须同步修改另一端或对应资源:
@@ -32,6 +38,8 @@
 - [ ] **新增了后台轮询/定时任务?** → 评估待机功耗, 并优先复用已有的节流入口(见 §3.7)
 - [ ] **新增了文件/网络资源?** → 确认在所有退出路径上都被释放(见 §6.5)
 - [ ] **改了 `SyncForegroundService` 的公开可见状态?** → 检查 `MainActivity` 的轮询 UI 是否需要同步
+- [ ] **新增了通知 / 换了应用图标?** → 小图标必须复用 `NOTIFICATION_SMALL_ICON`(见 §3.14 与 [`app-icons.md`](app-icons.md))
+- [ ] **碰了连接状态或 Peer 表?** → 两端各有一处「唯一真相来源」, 见 §3.13
 
 ---
 
@@ -299,6 +307,83 @@ UI 上提供各厂商的「加锁」操作指引。
 
 **这不是可选的 UI 装饰, 而是保活链的一环**, 改动时不要删。
 
+### 3.12 为什么「手动断开」要停搜索、还要抑制自动重连
+
+**问题**: 用户在手机上点「断开连接」, 几秒后连接自己又回来了 —— 断开形同虚设。
+
+**根因**(三个因素叠加):
+1. `disconnectCurrentPc()` 原先只切断了 SSE, **没有停扫描线程**;
+2. 扫描线程一发现目标电脑就会触发自动握手, 而判定条件「是记忆中的设备 + 内存里有 PIN」
+   此时全部成立(`currentTargetDeviceId` 与 `pinCode` 都还在);
+3. 于是断开动作刚做完, 扫描线程的下一轮就把连接接了回来。
+
+**解法**(顺序有讲究, 不要重排):
+1. **先落状态, 再断连接**: 先把 `connectionState = 0`, 再调 `sseClient.disconnect()`。
+   后者会**同步**回调 `onConnectionChanged(false)`, 而那里用 `connectionState == 1` 判断
+   是否属于「已连接 → 断开」跳变 —— 若此刻仍是 1, 就会走 `onPcDisconnected()`
+   把刚停掉的扫描线程重新拉起来;
+2. 置 `manualDisconnected = true`, 让 `onDeviceDiscovered()` 直接忽略扫描结果。
+   这是**兜底**: 即使时序上扫描多跑了一轮、或 mDNS 恰好回调了一次, 也绝不自动接回;
+3. 清空 `currentPcIp`, 让心跳线程自然停发 —— 否则它仍会持续向电脑端注册
+   (见 §3.13), 断开等于没断;
+4. `nsdHelper.stopDiscovery()` + `lanDiscovery.stopDiscovery()`, 使终态与
+   「自动搜索 15 分钟超时」**完全一致** —— 通知栏与页面都显示「搜索已暂停」。
+
+**抑制标志的解除时机**: 只在用户**主动发起连接**时清除 —— 重新扫描 / 输 PIN / 选设备 /
+重开自动搜索。断开是「用户说别连」, 这四种动作是「用户说要连」, 二者必须区分开。
+
+### 3.13 连接状态的「唯一真相来源」
+
+**问题**: 手机端已经断开, 电脑端托盘却继续显示「已连接手机: XXX (ip)」长达 10 分钟。
+
+**根因**: 电脑端 `server.rs` 的 Peer 表只在 **600 秒无心跳**后才被 `retain` 修剪,
+而 `/events` 的 SSE 写循环结束后**从不摘除** peer。于是「是否已连接」这个状态实际上变成了
+「最近 10 分钟内是否收到过心跳」, 与真实连接无关。
+
+**解法**: 让 Peer 的**注册与摘除与连接同生共死**:
+
+| 时机 | 动作 |
+| :--- | :--- |
+| `/auth` 握手成功、`/heartbeat`、`/sync`、`/events` 建连 | `register_peer()` |
+| 手机端主动断开 → `POST /disconnect` | `unregister_peer()` |
+| `/events` 长连接结束(含响应头写入失败) | `unregister_peer()` |
+| 600 秒无任何联系 | `retain` 超时兜底 |
+
+为什么三条路都要留:
+- `/disconnect` 是**即时**路径(POST 到达即生效), 覆盖用户正常点「断开连接」的场景;
+- SSE 连接结束是**兜底**路径, 覆盖「手机进程被杀 / 网络断开 / 用户没走正常断开流程」。
+  注意它有延迟: 电脑端要等下一次写入(keepalive 每 30 秒发一次)失败, 才知道对端没了;
+- 600 秒超时退化为「连 TCP 都不通知一声就消失」的极端场景兜底。
+
+**代价(已知且可接受)**: 手机侧网络抖动导致 SSE 瞬断时, 电脑端托盘可能短暂显示
+「已连接手机: 无」, 手机端 2 秒后自动重连即恢复。这比「断开后还挂 10 分钟」正确得多。
+
+**推论**: 新增任何「能表明手机端在线 / 离线」的端点时, 请让它在建立时注册、结束时摘除,
+不要只往 Peer 表里写而不管销账。
+
+### 3.14 为什么通知小图标必须用「图案层」而不是「完整图标」
+
+**问题**: 通知栏里显示的是一个与 App 图标无关的图标(早期用的是 Android 系统内置图标),
+后来想直接换成应用图标, 结果整条通知变成一坨实心方块。
+
+**根因**: Android 把通知小图标当作 **alpha 蒙版**渲染 —— 只取形状、丢弃颜色。
+`@mipmap/ic_launcher` 是自适应图标的**完整图**(前景层 + **不透明**背景层),
+整张都不透明, 套上蒙版就是一个实心方块; 而 `@drawable/ic_launcher_foreground`
+是透明底 + 图案的那一层, 蒙版后才是应用图标本身的形状剪影。
+
+**解法**: 所有通知的小图标统一走一个常量:
+
+```kotlin
+val NOTIFICATION_SMALL_ICON = R.drawable.ic_launcher_foreground
+```
+
+- 新增通知时**复用该常量**, 不要写字面量、不要改回 `@mipmap/ic_launcher`;
+- 分享面板的通知也复用它 —— 通知栏里所有 CrossClip 通知必须看起来来自同一个 App;
+- 快捷磁贴**相反**, 用的是 `@mipmap/ic_launcher`(完整彩色图标, 不走蒙版) ——
+  两条渲染路径别混。
+
+**完整规格、双端 7 处呈现与换图标步骤见 [`docs/app-icons.md`](app-icons.md)。**
+
 ---
 
 ## 4. 模块职责地图
@@ -309,8 +394,8 @@ UI 上提供各厂商的「加锁」操作指引。
 
 | 文件 | 职责 | 改它会牵连 |
 | :--- | :--- | :--- |
-| `main.rs` | 入口、Win32 托盘图标与菜单、单实例互斥、关机广播、右键菜单注册、WM_COPYDATA 接收、文件选择器、气泡通知 | 托盘菜单 ID 常量、`AppState` 字段、`wnd_proc` 分支 |
-| `server.rs` | HTTP 服务(18236)、SSE、鉴权、Peer 表、文件收发端点、**向手机发送文件**、接收端去重协商 | 协议、Peer 超时、`Broadcaster` |
+| `main.rs` | 入口、Win32 托盘图标与菜单、单实例互斥、关机广播、右键菜单注册、WM_COPYDATA 接收、文件选择器、文件发送入口(状态反馈走自绘浮窗, 已无气泡通知) | 托盘菜单 ID 常量、`AppState` 字段、`wnd_proc` 分支 |
+| `server.rs` | HTTP 服务(18236)、SSE、鉴权、**Peer 表的注册与摘除**、`/disconnect` 断开握手、文件收发端点、**向手机发送文件**、接收端去重协商 | 协议、Peer 生命周期(§3.13)、`Broadcaster` |
 | `crypto.rs` | SHA-256 派生、AES-GCM 加密(字符串 / 原始字节 / 流式文件哈希) | **两端必须一致**, 改任一函数都要核对 Android 的 `CryptoUtil.kt` |
 | `file_transfer.rs` | 文件传输状态机、分块读写、临时文件、重名规避、**同名+同大小+同哈希去重** | `CHUNK_SIZE` 必须与手机端一致 |
 | `clipboard.rs` | Win32 剪贴板读写、`IS_UPDATING_SELF` 防回环 | 回环控制 |
@@ -326,19 +411,19 @@ UI 上提供各厂商的「加锁」操作指引。
 
 | 文件 | 职责 | 改它会牵连 |
 | :--- | :--- | :--- |
-| `service/SyncForegroundService.kt` (1281 行) | **核心枢纽**: 前台服务、连接状态机、配对、SSE 调度、心跳、文件回调、通知 | 几乎一切。改前务必通读一遍 |
-| `ui/MainActivity.kt` (893 行) | 主界面、设备列表与切换、各项设置、日志工具 | 布局 `activity_main.xml` 的 id 必须一一对应 |
+| `service/SyncForegroundService.kt` (1450 行) | **核心枢纽**: 前台服务、连接状态机、配对、SSE 调度、心跳、文件回调、通知、**手动断开语义(§3.12)**、**通知小图标常量(§3.14)** | 几乎一切。改前务必通读一遍 |
+| `ui/MainActivity.kt` (896 行) | 主界面、设备列表与切换、各项设置、日志工具; 「断开连接」按钮入口 | 布局 `activity_main.xml` 的 id 必须一一对应; 轮询 UI 的文案必须与服务端 `statusTextForNotification()` 一致 |
 | `shizuku/ShizukuClipboardManager.kt` (1001 行) | Shizuku Binder 剪贴板读写、底层监听、轮询兜底 | 降级链、自检工具 |
 | `shizuku/ShizukuPrivilegeHelper.kt` | Shell 特权白名单注入、UID 2000 唤醒脉冲 | 保活能力(`PULSE_INTERVAL_SEC`) |
 | `network/LocalHttpServer.kt` | 手机侧 HTTP 服务(18237), **keep-alive 循环处理请求**, prepare 响应回告 `already_exists` | 与 `server.rs` 的发送端配对 |
 | `network/FileUploader.kt` | 手机→电脑文件发送(分块+加密+进度), 带 `file_hash`, 电脑端已有该文件时整个跳过上传 | `CHUNK_SIZE`、二进制帧格式 |
 | `network/FileReceiver.kt` | 电脑→手机文件接收(临时文件+校验+落盘), **同名+同大小+同哈希去重** | `SaveDirManager` |
-| `network/HttpUploader.kt` | 剪贴板密文与心跳上报 | 协议字段 |
+| `network/HttpUploader.kt` | 剪贴板密文、心跳上报、**主动断开时向电脑端发的 `POST /disconnect` 告别请求** | 协议字段; 该请求是「尽力而为」, 失败静默, 由 §3.13 的两条兜底路径接管 |
 | `network/SseClient.kt` | 出站长连接客户端 | 重连策略 |
 | `network/LanDiscovery.kt` | UDP 广播、子网并发探测、**自动搜索降频状态机** | 耗电表现 |
 | `network/NsdHelper.kt` | mDNS 发现 + HTTP 探活过滤幽灵缓存 | 发现成功率 |
 | `crypto/CryptoUtil.kt` | 与 Rust `crypto.rs` **逐字节对称** | 改一端必须改另一端 |
-| `receiver/ShareReceiveActivity.kt` | 系统分享面板入口(SEND / SEND_MULTIPLE) | `AndroidManifest.xml` 的 intent-filter |
+| `receiver/ShareReceiveActivity.kt` | 系统分享面板入口(SEND / SEND_MULTIPLE); 通知图标复用 `NOTIFICATION_SMALL_ICON` | `AndroidManifest.xml` 的 intent-filter |
 | `receiver/ProcessTextActivity.kt` | 文本选择菜单「发送至电脑」 | 同上 |
 | `ui/ClipWriteActivity.kt` | 透明 Activity, 抢焦点写剪贴板(降级链第 3 层) | 降级链 |
 | `ui/OpenSaveDirActivity.kt` | 无界面跳板: 「文件接收完成」通知点击后打开保存目录, 随即 `finish()` | 打开目录必须由 Activity 上下文发起 |
@@ -358,7 +443,7 @@ UI 上提供各厂商的「加锁」操作指引。
 | 端口 | 类型 | 归属 | 用途 |
 | :--- | :--- | :--- | :--- |
 | 18234 | UDP | Windows | 自发现广播应答(OFFER) |
-| 18236 | HTTP/SSE | Windows | `/ping` `/auth` `/sync` `/heartbeat` `/file/*` `/events` |
+| 18236 | HTTP/SSE | Windows | `/ping` `/auth` `/sync` `/heartbeat` `/disconnect` `/file/*` `/events` |
 | 18237 | HTTP | Android | `/ping` `/sync` `/file/*`(对等兜底推送 + 文件接收) |
 | — | mDNS | 双端 | `_crossclip._tcp.local.`, TXT 携带 `device_id` |
 
@@ -379,7 +464,7 @@ hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
 
 | 路径 | 方法 | Body | 说明 |
 | :--- | :--- | :--- | :--- |
-| `/file/prepare` | POST | JSON `{type,file_id,filename,file_size,mime_type,sender_id}` | 建临时文件 |
+| `/file/prepare` | POST | JSON `{type,file_id,filename,file_size,mime_type,sender_id,file_hash?}` | 建临时文件; 带 `file_hash` 时做接收端去重(响应回 `already_exists`) |
 | `/file/chunk?file_id=&index=&total=` | POST | **二进制密文** | 元数据在 query, 密文在 body |
 | `/file/complete` | POST | JSON `{type,file_id,file_hash}` | 校验整文件哈希并落盘 |
 
@@ -403,7 +488,9 @@ hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
 3. SSE 长连接必须跑在独立线程, 不能占用工作线程池(§3.1);
 4. Windows 托盘窗口必须是顶层隐藏窗口(§3.6);
 5. 文件临时数据不得直接写用户可见目录(§3.9);
-6. 单实例语义必须保留(§3.10)。
+6. 单实例语义必须保留(§3.10);
+7. 所有通知的小图标必须复用 `SyncForegroundService.NOTIFICATION_SMALL_ICON`(§3.14);
+8. Peer 的注册与摘除必须与连接同生共死 —— 新增端点时不要只写不销账(§3.13)。
 
 ### 6.2 新增一个「手机 → 电脑」的能力
 
@@ -470,6 +557,9 @@ hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
 | 11 | 大文件(.apk / .rar)收完后通知栏卡在「正在接收 100%」 | 完成通知与 `setOngoing(true)` 的进度通知都要经 `mainHandler.post` 异步投递, 存在竞态; 而 ongoing 通知不会自动消失 | `SyncForegroundService.fileTransferSettled` 在终态后丢弃一切迟到的进度刷新 |
 | 12 | Windows 端无法显示文件传输进度 | `NOTIFYICONDATAW` 的 `NIF_INFO` 气泡只支持标题 + 正文两行文本, 没有进度条能力 | `progress_window.rs` 自绘置顶无边框浮窗(收发双向共用) |
 | 13 | 嵌入 exe 图标后链接报 `LNK1104` | `cargo:rustc-link-arg` 的值**不能加引号**, 引号会被原样带进 link 命令行, 路径被判为非法文件名 | `build.rs` 输出裸路径(项目路径含空格时需另行处理) |
+| 14 | 通知栏里显示的是「另一个图标」, 与应用图标无关 | 所有通知的 `setSmallIcon` 用的都是 Android 系统内置图标(`ic_menu_share` / `ic_menu_save` / `ic_dialog_*` / `ic_menu_upload`) | 统一走 `SyncForegroundService.NOTIFICATION_SMALL_ICON`(§3.14) |
+| 15 | 点「断开连接」后几秒又自己连上 | `disconnectCurrentPc()` 只断了 SSE 没停扫描线程; 扫描发现「记忆中的设备 + 内存里还有 PIN」即重新握手 | 断开即停 UDP/mDNS 搜索并置 `manualDisconnected` 抑制重连(§3.12) |
+| 16 | 手机端已断开, 电脑端托盘仍显示「已连接手机」 | Peer 表只在 600 秒无心跳后才修剪, SSE 连接结束也不摘除, 状态退化成「最近 10 分钟是否收到过心跳」 | 新增 `POST /disconnect` 即时摘除, SSE 长连接结束时也摘除(§3.13) |
 
 ---
 
@@ -503,6 +593,9 @@ cd android && ./gradlew assembleRelease
 - [ ] 剪贴板双向同步(含中文);
 - [ ] 文件双向传输(>100 MB 大文件, 观察速度与内存占用);
 - [ ] 息屏 5 分钟后仍能收到同步(考验保活);
+- [ ] 通知栏里的小图标与应用图标一致(是图案剪影, 不是白块、也不是系统图标);
+- [ ] **手动点「断开连接」后, 手机不再自动连回**(至少等 1 分钟), 且通知栏显示「搜索已暂停」;
+- [ ] **手机端断开后, 电脑端托盘菜单立即变为「已连接手机: 无」**(不必等 10 分钟);
 - [ ] 断开电脑后, 手机在 15 分钟内降频、之后停止搜索;
 - [ ] 关机时 Windows 端能立即退出(不拖住关机);
 - [ ] 资源管理器右键文件 → 「发送文件到手机」可用(程序已在运行时);
@@ -521,6 +614,9 @@ cd android && ./gradlew assembleRelease
 | **降级链** | Shizuku → 普通写入 → 透明 Activity 的三层剪贴板写入策略 |
 | **唤醒脉冲** | UID 2000 Shell 进程每 10 秒发的广播, 用于解冻被 ROM 冷冻的应用进程 |
 | **时间窗** | 自动搜索的分阶段降频计时(0–5 / 5–15 / >15 分钟) |
+| **手动断开抑制** | `manualDisconnected` 标志: 用户点过断开后, 扫描结果不再触发自动重连, 直到用户主动发起连接(§3.12) |
+| **Peer 摘除** | `Broadcaster::unregister_peer()`: 连接结束时把该 IP 从 Peer 表移除, 让托盘状态与真实连接同步(§3.13) |
+| **通知小图标** | 通知栏左侧的图标, 被系统按 alpha 蒙版渲染, 因此必须用图案层而非完整图标(§3.14) |
 
 ---
 

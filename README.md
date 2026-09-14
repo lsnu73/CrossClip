@@ -77,7 +77,8 @@ CrossClip/
 └── docs/
     ├── ai-handover.md         # ★ AI 开发交接契约（接手开发前必读）
     ├── protocol.md            # 局域网协议与加密细节
-    └── engineering-rules.md   # 双端工程约束规范
+    ├── engineering-rules.md   # 双端工程约束规范
+    └── app-icons.md           # 应用图标 / 通知图标 / 托盘图标体系
 ```
 
 ## 快速上手
@@ -142,4 +143,4 @@ cd android
 
 ## License
 
-[MIT](LICENSE) © CrossClip Project Authors
+MIT © CrossClip Project Authors

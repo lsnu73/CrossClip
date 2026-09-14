@@ -26,3 +26,18 @@
 - 收到 `WM_ENDSESSION` 后快速释放网络资源并 `exit(0)`,严禁阻塞系统关机;
 - 通过 `SetConsoleCtrlHandler` 兜底捕获 `CTRL_SHUTDOWN_EVENT` / `CTRL_LOGOFF_EVENT`;
 - 入口绑定系统命名互斥体实现单实例,重复启动静默退出,避免托盘图标堆叠与端口冲突。
+
+## 图标与通知(双端)
+
+- 所有 Android 通知的小图标必须复用 `SyncForegroundService.NOTIFICATION_SMALL_ICON`(即 `@drawable/ic_launcher_foreground`),禁止写字面量、禁止改用 `@mipmap/ic_launcher` —— 通知小图标按 alpha 蒙版渲染,完整图标含不透明背景层,套上蒙版会显示成实心方块;
+- 快捷磁贴相反,用 `@mipmap/ic_launcher`(彩色完整图标,不走蒙版);两条渲染路径不得混用;
+- 图标源图是仓库根目录 `软件图标.png`(2048×2048),各端资源均为其手工派生物且仓库内无生成脚本;换图标必须按 `docs/app-icons.md` 的规格表逐个重新导出(双端共 7 处呈现),并一并提交源图;
+- Windows 侧只有一个图标文件 `rust_desktop/assets/app.ico`(多尺寸),它既供托盘(`icon.rs`)也供 exe 资源节(`build.rs` + `app.rc`),两者必须是同一张图;
+- `build.rs` 找不到 `rc.exe` 时只告警不中断构建,因此「exe 图标没更新」时先查 cargo 输出有无 `未找到 rc.exe` 警告。
+
+## 连接状态与断开语义
+
+- 电脑端 Peer 表的注册与摘除必须与连接同生共死:建连时 `register_peer()`,连接结束时就 `unregister_peer()`;600 秒心跳超时只是兜底,不得当作「是否已连接」的判定依据;
+- 手机端主动断开的顺序固定为「先落 `connectionState = 0` → 通知电脑端(`POST /disconnect`)→ 清空 `currentPcIp` → 断开 SSE → 停止 UDP/mDNS 搜索」;顺序颠倒会让 `sseClient.disconnect()` 的同步回调把扫描线程重新拉起;
+- 用户手动断开后必须置 `manualDisconnected` 抑制自动重连,该标志只在用户主动发起连接(重新扫描/输 PIN/选设备/重开自动搜索)时清除;
+- 手动断开的终态必须与「自动搜索 15 分钟超时」一致(通知栏与页面均显示「搜索已暂停」),不要为它单独造第三种状态。
