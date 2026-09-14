@@ -50,6 +50,12 @@ class CrossClipApp : Application() {
     private fun publishShareShortcut() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N_MR1) return
         try {
+            // 已发布过同名快捷方式就跳过：addDynamicShortcuts 受系统限流约束
+            // (短时间内频繁增删会被静默拒绝)，而本应用的进程经常被 ROM 杀掉重启，
+            // 每次启动都重发一遍迟早撞上限流
+            if (ShortcutManagerCompat.getDynamicShortcuts(this).any { it.id == "send_to_pc" }) {
+                return
+            }
             val shortcut = ShortcutInfoCompat.Builder(this, "send_to_pc")
                 .setShortLabel(getString(R.string.share_shortcut_label))
                 .setLongLabel(getString(R.string.share_shortcut_long_label))
@@ -62,8 +68,6 @@ class CrossClipApp : Application() {
                 )
                 .setCategories(setOf("com.crossclip.app.category.SEND_TO_PC"))
                 .build()
-            // 先清后发，避免应用迭代后残留指向已改名的目标类的旧快捷方式
-            ShortcutManagerCompat.removeAllDynamicShortcuts(this)
             val ok = ShortcutManagerCompat.addDynamicShortcuts(this, listOf(shortcut))
             DebugLogger.log("APP_LIFECYCLE", "发布「直接分享」快捷方式: success=$ok")
         } catch (e: Exception) {
