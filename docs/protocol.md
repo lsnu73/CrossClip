@@ -33,7 +33,7 @@ hash      = SHA-256(text)                  # 防回环与完整性校验
 | `/heartbeat` | POST | 手机端保活并刷新设备表 | `{"pin_hash":…,"device_id":…,"device_name":…,"device_brand":…}` | `{"status":"ok"}` |
 | `/disconnect` | POST | 手机端主动断开,立即摘除该设备在电脑端的连接状态 | `{"pin_hash":…,"device_id":…}` | `{"status":"ok"}` |
 
-**`device_brand` 字段(v1.1.2+)**:手机端在 `/auth` 握手内层密文与 `/heartbeat` 中上报
+**`device_brand` 字段(tag 2.1.1+)**:手机端在 `/auth` 握手内层密文与 `/heartbeat` 中上报
 `Build.MANUFACTURER`(如 `"vivo"`),电脑端托盘以「品牌 + 型号」形式展示(如 `vivo V2324A`;
 设备名本身已含品牌时去重不重复拼接)。该字段为**可选新增**:老版本手机不上报则电脑端
 显示为空并退化为仅显示设备名,老版本电脑端收到则静默忽略,双端新旧组合均兼容。

@@ -389,6 +389,28 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 
 **完整规格、双端 7 处呈现与换图标步骤见 [`docs/app-icons.md`](app-icons.md)。**
 
+### 3.15 为什么「点击浮窗打开目录」用 ShellExecuteW 而不是 explorer /select
+
+**问题**: 手机发文件到电脑后, 用户希望点击右下角「文件接收完成」浮窗直接跳到
+文件所在目录。
+
+**两种做法的取舍**:
+- `explorer.exe /select,<文件>`: 可以**预选中该文件**, 但硬编码了系统资源管理器 ——
+  用户把「文件夹打开方式」的默认程序交给第三方管理器(Total Commander / Directory Opus
+  等)时会被无视, 拉起的仍是 explorer;
+- `ShellExecuteW(NULL, "open", <目录>, …)`: 走注册表 `Directory` 类注册的默认处理程序,
+  第三方管理器接管时正确拉起第三方; 代价是**无法预选中文件本身**。
+
+**选择**: 尊重默认管理器。与 Android 端「打开保存目录」让用户自选并记住默认应用
+(§7 #18)语义一致 —— **用户设定的默认打开方式优先于任何便利性**。
+
+**边界**(都在 `progress_window.rs`, 改动时不要破坏):
+- 只有「接收成功」的终态浮窗可点击(`OPEN_PATH` 有值); 进行中 / 失败 / 发送侧浮窗
+  点击无动作;
+- `OPEN_PATH` 与浮窗同生命周期, 每轮 `show_progress` / `finish*` 都会重置 ——
+  防止自动关闭前点击打开的是**上一轮**传输的旧目录;
+- 打开失败(返回值 ≤ 32)只打日志不弹窗: 浮窗是尽力而为的辅助功能, 不能打扰主流程。
+
 ---
 
 ## 4. 模块职责地图
@@ -408,7 +430,7 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 | `ip_util.rs` | 局域网 IP 提取(过滤 VPN / 虚拟网卡 / VMware) | 发现成功率 |
 | `udp_discovery.rs` | UDP 18234 广播应答(OFFER 报文) | 两端发现协议字段 |
 | `mdns.rs` | mDNS 服务发布(`_crossclip._tcp.local.`) | 与 Android `NsdHelper` 配对 |
-| `progress_window.rs` | **自绘文件传输进度浮窗**(置顶 / 无边框 / 不抢焦点) | 托盘气泡通知没有进度条能力, 这是唯一能显示进度的途径 |
+| `progress_window.rs` | **自绘文件传输进度浮窗**(置顶 / 无边框 / 不抢焦点), 接收成功终态可点击打开所在目录(§3.15) | 托盘气泡通知没有进度条能力, 这是唯一能显示进度的途径; 点击跳转必须走 ShellExecuteW 而非硬编码 explorer |
 | `icon.rs` | 从内嵌 `assets/app.ico` 里挑尺寸最接近的条目建 HICON | 必须与 `build.rs` 嵌进 exe 资源的是同一张图 |
 | `build.rs` + `app.rc` | 用 Windows SDK 的 `rc.exe` 把图标嵌进 exe 资源节(找不到只告警、不中断构建) | 影响 exe 文件自身显示的图标 |
 
@@ -434,7 +456,7 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 | `ui/OpenSaveDirActivity.kt` | 无界面跳板: 「文件接收完成」通知点击后打开保存目录, 随即 `finish()` | 打开目录必须由 Activity 上下文发起 |
 | `ui/ScanRefreshController.kt` | 「重新扫描」的旋转箭头动画与「正在扫描中」文案 | 依赖 `activity_main.xml` 的 `iv_refresh_icon` / `tv_refresh_label` |
 | `tile/SendClipTileService.kt` | 控制中心快捷磁贴 | 手动发送入口 |
-| `util/SaveDirManager.kt` | 保存目录配置(SAF)、落盘、打开目录 | `file_paths.xml`(FileProvider) |
+| `util/SaveDirManager.kt` | 保存目录配置(SAF)、落盘、打开目录 | `file_paths.xml`(FileProvider); 「打开目录」需探测三套目录 MIME 口径并合并结果(§7 #18) |
 | `util/DebugLogger.kt` | 双文件日志(内部 + 外部)、5 MB 轮转、崩溃捕获 | 排查问题的唯一手段 |
 | `util/PermissionHelper.kt` | 各厂商权限/电池/自启动页面跳转 | 保活引导 |
 | `CrossClipApp.kt` | Application 入口: 日志初始化、崩溃捕获、系统状态快照 | 诊断能力 |
@@ -566,6 +588,7 @@ hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
 | 15 | 点「断开连接」后几秒又自己连上 | `disconnectCurrentPc()` 只断了 SSE 没停扫描线程; 扫描发现「记忆中的设备 + 内存里还有 PIN」即重新握手 | 断开即停 UDP/mDNS 搜索并置 `manualDisconnected` 抑制重连(§3.12) |
 | 16 | 手机端已断开, 电脑端托盘仍显示「已连接手机」 | Peer 表只在 600 秒无心跳后才修剪, SSE 连接结束也不摘除, 状态退化成「最近 10 分钟是否收到过心跳」 | 新增 `POST /disconnect` 即时摘除, SSE 长连接结束时也摘除(§3.13) |
 | 17 | 中等大小文件(实测 5/10/20/50MB)收完后通知栏卡在「正在接收 100%」, 而 1/2/100MB 反而正常 | 终态「完成」通知与进行中卡片共用同一通知 ID: 进行中卡片在同一 ID 上高频更新过若干次, 个别 ROM 的通知优化会合并/限流「同 ID 的快速连续更新」, 最后一条终态更新被系统吞掉; 触发与否取决于传输时长落在哪个窗口, 故呈现「个别大小必现」的假象 | 终态(完成/失败)通知改用**全新 ID** `NOTIFICATION_ID_FILE_SETTLED`(2003)发布, 并显式 `cancel` 进行中卡片 —— 新 ID 是「新通知」而非「第 N 次更新」, 从根上绕开同 ID 更新合并; 另桌面端补上 chunk/complete 响应状态码检查, 手机端拒绝时浮窗报「发送失败」而非假成功 |
+| 18 | Android「打开保存目录」选择列表只有一个「文件」可选, 装了的其他文件管理器不出现 | `resolveDirOpeners` 取**第一个有解析结果的 Intent** 就返回; 而目录 Intent 有三套互不覆盖的 MIME 注册口径(系统 DocumentsUI 认 `vnd.android.document/directory`, 多数 OEM/第三方管理器只注册 `resource/folder`, 部分如 Total Commander 只注册 `application/x-directory`), 第一套有结果时其余口径的应用全被吞掉 | 合并**全部**候选 Intent 的解析结果并按 `包名/类名` 去重, 再按文件管理器特征排序; 三种 MIME 口径全部探测。教训: **多口径解析必须取并集, 不能「first-non-empty-wins」** |
 
 ---
 
@@ -590,7 +613,7 @@ cd android && ./gradlew assembleRelease
 - **Android**: `DebugLogger` 会同时写内部(`filesDir`)与外部(`getExternalFilesDir`)两份日志,
   5 MB 轮转。App 内「诊断与排查工具」可查看/复制/导出。点击日志路径可打开所在目录。
 - **Windows**: 崩溃写 `crossclip_crash.log`(工作目录); 运行时状态见托盘 tooltip 与托盘菜单;
-  文件收发过程有气泡通知。
+  文件收发过程有自绘进度浮窗(接收完成的终态可点击打开所在目录, §3.15)。
 
 ### 8.3 验证清单(改动后至少跑一遍)
 
@@ -605,7 +628,24 @@ cd android && ./gradlew assembleRelease
 - [ ] 断开电脑后, 手机在 15 分钟内降频、之后停止搜索;
 - [ ] 关机时 Windows 端能立即退出(不拖住关机);
 - [ ] 资源管理器右键文件 → 「发送文件到手机」可用(程序已在运行时);
-- [ ] 自定义保存目录后重启 App 仍能写入。
+- [ ] 自定义保存目录后重启 App 仍能写入;
+- [ ] 手机向电脑发文件, 完成后点击右下角浮窗能打开文件所在目录; 「文件夹打开方式」被
+  第三方管理器(Total Commander 等)接管时应拉起第三方而非 explorer(§3.15);
+- [ ] Android 长按保存目录路径弹出的选择列表包含设备上所有能开目录的应用
+  (装了多个文件管理器时逐个可见, §7 #18)。
+
+### 8.4 版本与发布约定
+
+三套版本号各管各的, **判断新旧一律以 git tag 为准**:
+
+| 版本 | 位置 | 用途 |
+| :--- | :--- | :--- |
+| git tag `2.x.y` | 仓库标签 | **发版主线**。功能合入后打小版本(tag 2.1.0 → 2.1.1), 与 Android/桌面端无关, 代表「一次双端发布」 |
+| `versionName` / `versionCode` | `android/app/build.gradle.kts` | 仅用于确认手机上装的 APK 是哪一版(发版时递增, 当前 1.1.2 / 19) |
+| `version` | `rust_desktop/Cargo.toml` | 历史上不跟随发布更新, **不要用它判断新旧** |
+
+- 协议文档(`protocol.md`)里标注的字段引入版本一律以 git tag 书写(如 `tag 2.1.1+`);
+- 打 tag 的时机: 功能提交之后; 文档/注释类的提交不需要另起 tag。
 
 ---
 
@@ -613,7 +653,7 @@ cd android && ./gradlew assembleRelease
 
 | 术语 | 含义 |
 | :--- | :--- |
-| **Peer** | 已注册的对等设备记录(`server.rs::ClientPeer`), 含 ip / port / device_id / last_seen |
+| **Peer** | 已注册的对等设备记录(`server.rs::ClientPeer`), 含 ip / port / device_id / device_name / device_brand / last_seen |
 | **OFFER** | UDP 发现应答报文, 携带设备名、device_id、候选 IP 列表、http_port |
 | **出站长连接** | 手机主动向电脑发起的 SSE 连接(相对「入站」) |
 | **防回环** | 通过内容哈希拦截自己写入引发的反射同步 |
