@@ -165,7 +165,7 @@ fn open_saved_dir() {
     unsafe {
         let result = ShellExecuteW(
             null_mut(),
-            verb.as_ptr(),
+            null_mut(),
             dir_wide.as_ptr(),
             null_mut(),
             null_mut(),
