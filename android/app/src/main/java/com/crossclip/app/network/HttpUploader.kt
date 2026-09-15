@@ -35,6 +35,7 @@ object HttpUploader {
         pinCode: String,
         deviceId: String = "",
         deviceName: String = "",
+        deviceBrand: String = "",
         clientPort: Int = 18237,
         onResult: (success: Boolean, statusCode: Int, deviceName: String?, deviceId: String?) -> Unit
     ) {
@@ -48,6 +49,8 @@ object HttpUploader {
             put("client_port", clientPort)
             put("device_id", deviceId)
             put("device_name", deviceName)
+            // 老版本电脑端不认识该字段会静默忽略；老版本手机不发送则电脑端显示为空，均向后兼容
+            put("device_brand", deviceBrand)
         }.toString()
 
         // 使用 PIN 派生密钥进行 AES-256-GCM 加密 (杜绝明文 PIN 传输)
@@ -158,6 +161,7 @@ object HttpUploader {
         pinCode: String,
         deviceId: String,
         deviceName: String,
+        deviceBrand: String = "",
         clientPort: Int = 18237,
         onResult: ((Boolean) -> Unit)? = null
     ) {
@@ -169,6 +173,7 @@ object HttpUploader {
             put("client_port", clientPort)
             put("device_id", deviceId)
             put("device_name", deviceName)
+            put("device_brand", deviceBrand)
             put("timestamp", System.currentTimeMillis())
         }.toString()
         val requestBody = json.toRequestBody(JSON_MEDIA_TYPE)

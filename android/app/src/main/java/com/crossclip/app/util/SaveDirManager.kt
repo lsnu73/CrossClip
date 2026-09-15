@@ -214,15 +214,17 @@ object SaveDirManager {
      * 根目录生成 URI（对根目录本身调用 getUriForFile 会抛 StringIndexOutOfBoundsException），
      * 因此这里统一使用外部存储 SAF 文档 URI。
      *
-     * 目录 MIME 有两套互不覆盖的注册口径：系统 DocumentsUI 认 `vnd.android.document/directory`，
+     * 目录 MIME 有三套互不覆盖的注册口径：系统 DocumentsUI 认 `vnd.android.document/directory`，
      * 而大量 OEM/第三方文件管理器只注册了 `resource/folder`（实测 vivo 自带文件管理不在前者的
-     * 解析结果里）。每个目录都要生成两种 MIME 的候选，缺哪套哪类应用就不出现。
+     * 解析结果里），另有部分管理器（如 Total Commander）只注册 `application/x-directory`。
+     * 每个目录都要生成三种 MIME 的候选，缺哪套哪类应用就不出现。
      */
     private fun buildDirIntents(context: Context): List<Intent> {
         val intents = mutableListOf<Intent>()
         val dirMimes = arrayOf(
             DocumentsContract.Document.MIME_TYPE_DIR, // vnd.android.document/directory
-            "resource/folder"
+            "resource/folder",
+            "application/x-directory"
         )
         // 优先：用户授权过的自定义目录（SAF tree URI，只支持目录 MIME 这一种形态）
         getCustomDirUri(context)?.let { uri ->
@@ -275,24 +277,27 @@ object SaveDirManager {
     /**
      * 解析所有「能打开保存目录」的应用。
      *
-     * 按候选顺序取第一个**有解析结果**的目录 Intent（保住「自定义目录优先」语义），收集它的
-     * 全部处理应用并按文件管理器特征排序。目录 MIME 有两套互不覆盖的注册口径：
-     * 系统 DocumentsUI 认 `vnd.android.document/directory`，而大量 OEM/第三方文件管理器只注册
-     * `resource/folder`（实测 vivo 自带文件管理不在前者的解析结果里），两套都要探测。
+     * 合并**全部**候选 Intent 的解析结果（去重）并按文件管理器特征排序。目录 MIME 有三套
+     * 互不覆盖的注册口径：系统 DocumentsUI 认 `vnd.android.document/directory`，而大量 OEM/
+     * 第三方文件管理器只注册 `resource/folder`（实测 vivo 自带文件管理不在前者的解析结果里），
+     * 还有部分管理器只注册 `application/x-directory` —— 三套都要探测并取并集。
+     * 旧实现「取第一个有结果的 Intent 就返回」会让只认其他口径的应用永远不出现，
+     * 用户在选择列表里只能看到「文件」一个选项。
+     *
+     * 「自定义目录优先」语义不受影响：候选 Intent 仍按自定义目录 → 精确默认目录 → 兜底下载
+     * 目录排序，[launchDirWith] 按同样顺序找到该组件能响应的那一个来调起。
      */
     fun resolveDirOpeners(context: Context): List<DirOpener> {
         val pm = context.packageManager
+        data class Entry(val opener: DirOpener, val isFileManager: Boolean)
+        val seen = HashSet<String>()
+        val entries = mutableListOf<Entry>()
         for (intent in buildDirIntents(context)) {
             val resolvers = try {
                 pm.queryIntentActivities(intent, 0)
             } catch (e: Exception) {
                 emptyList()
             }
-            if (resolvers.isEmpty()) continue
-
-            data class Entry(val opener: DirOpener, val isFileManager: Boolean)
-            val seen = HashSet<String>()
-            val entries = mutableListOf<Entry>()
             for (ri in resolvers) {
                 val pkg = ri.activityInfo.packageName
                 val cls = ri.activityInfo.name
@@ -308,9 +313,8 @@ object SaveDirManager {
                     isFileManager
                 )
             }
-            return entries.sortedByDescending { it.isFileManager }.map { it.opener }
         }
-        return emptyList()
+        return entries.sortedByDescending { it.isFileManager }.map { it.opener }
     }
 
     /**

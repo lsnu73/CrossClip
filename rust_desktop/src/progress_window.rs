@@ -16,6 +16,8 @@
 //!   弹窗抢焦点是极其讨厌的行为。
 //! - 所有失败路径都必须静默降级：浮窗画不出来无所谓，绝不能影响传输本身。
 //! - 终态必须自动消失：不能让「发送完成」这种一次性信息永久占着屏幕。
+//! - 点击终态浮窗 = 打开接收文件的所在目录（走系统默认的文件夹处理程序，
+//!   见 [`open_saved_dir`]）；进行中 / 失败态的点击无动作。
 
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -23,6 +25,7 @@ use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 /// 主线程收到这个消息后刷新浮窗（由工作线程投递）
@@ -53,6 +56,12 @@ static TIMER_ARMED: AtomicBool = AtomicBool::new(false);
 /// 当前要展示的快照；`None` 表示应当关闭浮窗
 static STATE: Mutex<Option<ToastState>> = Mutex::new(None);
 
+/// 当前终态浮窗对应的「可打开」路径（接收完成的落盘文件）。
+///
+/// 与 `STATE` 同生命周期：每次 show/finish 都会重置，保证点击时打开的目录
+/// 一定对应用户眼前这条浮窗，而不是上一次传输的陈旧路径。
+static OPEN_PATH: Mutex<Option<String>> = Mutex::new(None);
+
 /// 浮窗处于哪个阶段
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -82,6 +91,8 @@ pub fn init(main_hwnd: HWND) {
 
 /// 进入「进行中」状态（`total` 为 0 时进度条保持空白）
 pub fn show_progress(title: &str, detail: &str, total: u64) {
+    // 进行中没有「打开目录」语义，顺带清掉上一轮可能残留的路径
+    *OPEN_PATH.lock().unwrap() = None;
     set_state(ToastState {
         title: title.to_string(),
         detail: detail.to_string(),
@@ -109,8 +120,21 @@ pub fn update_progress(done: u64, total: u64) {
     poke_main_thread();
 }
 
-/// 进入「终态」：展示结果，并在 [`AUTO_CLOSE_MS`] 后自动关闭
+/// 进入「终态」：展示结果，并在 [`AUTO_CLOSE_MS`] 后自动关闭。
+///
+/// `open_path` 不为空时，终态浮窗可点击跳转到该路径所在目录
+/// （接收完成场景传入落盘文件路径；发送/失败场景传 `None`，点击无动作）。
 pub fn finish(title: &str, detail: &str, success: bool) {
+    finish_inner(title, detail, success, None);
+}
+
+/// 同 [`finish`]，但携带「点击打开所在目录」的目标路径
+pub fn finish_openable(title: &str, detail: &str, success: bool, open_path: Option<&str>) {
+    finish_inner(title, detail, success, open_path);
+}
+
+fn finish_inner(title: &str, detail: &str, success: bool, open_path: Option<&str>) {
+    *OPEN_PATH.lock().unwrap() = open_path.map(|p| p.to_string());
     set_state(ToastState {
         title: title.to_string(),
         detail: detail.to_string(),
@@ -118,6 +142,41 @@ pub fn finish(title: &str, detail: &str, success: bool) {
         total: 0,
         phase: if success { Phase::Done } else { Phase::Failed },
     });
+}
+
+/// 点击终态浮窗：用系统默认方式打开文件所在目录。
+///
+/// **必须用 `ShellExecuteW` 的 `open` 动词而不是硬编码 `explorer.exe /select`**：
+/// ShellExecute 会解析注册表里 `Directory` 类注册的默认处理程序，第三方资源管理器
+/// （Total Commander / Directory Opus 等接管了文件夹打开方式的工具）因此也能被正确
+/// 调起；硬编码 explorer 会绕开用户的默认管理器。代价是无法预选中文件本身，
+/// 这里选择「尊重默认管理器」而非「选中文件」。
+fn open_saved_dir() {
+    let path = OPEN_PATH.lock().unwrap().clone();
+    let Some(path) = path else { return };
+    let dir = match std::path::Path::new(&path).parent() {
+        Some(parent) if parent.as_os_str().is_empty() => std::path::Path::new(&path),
+        Some(parent) => parent,
+        None => return,
+    };
+    let dir_str = dir.to_string_lossy().to_string();
+    let verb = to_wide("open");
+    let dir_wide = to_wide(&dir_str);
+    unsafe {
+        let result = ShellExecuteW(
+            null_mut(),
+            verb.as_ptr(),
+            dir_wide.as_ptr(),
+            null_mut(),
+            null_mut(),
+            SW_SHOWNORMAL as i32,
+        );
+        // 返回值 ≤ 32 表示失败（句柄 > 32 才是成功）；失败时仅打日志即可，
+        // 浮窗本身是尽力而为的辅助功能，不能反过来打扰传输主流程
+        if result as isize <= 32 {
+            println!("[ProgressWindow] 打开保存目录失败: {}", dir_str);
+        }
+    }
 }
 
 /// 人类可读的文件大小。
@@ -274,6 +333,28 @@ unsafe extern "system" fn wnd_proc(
             paint(hwnd);
             0
         }
+        WM_SETCURSOR => {
+            // 命中客户区时换成手型光标，提示「可点击」；非客户区交回默认处理
+            if (lparam as usize & 0xFFFF) as u32 == HTCLIENT {
+                SetCursor(LoadCursorW(null_mut(), IDC_HAND));
+                1
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_LBUTTONUP => {
+            // 仅接收成功的终态可点击跳目录；进行中/失败态的点击没有语义
+            let clickable = STATE
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|s| s.phase == Phase::Done)
+                && OPEN_PATH.lock().unwrap().is_some();
+            if clickable {
+                open_saved_dir();
+            }
+            0
+        }
         WM_TIMER => {
             if wparam == TIMER_AUTO_CLOSE {
                 // 终态停留结束：清空状态并立刻走一次 tick 把窗口销毁
@@ -419,7 +500,7 @@ unsafe fn paint(hwnd: HWND) {
             DeleteObject(fill_brush);
         }
 
-        // 百分比 / 终态标记
+        // 百分比 / 终态标记；接收完成的终态在左侧给出「点击打开所在目录」的点击提示
         SetTextColor(hdc, accent_color);
         let mut pct_rect = RECT {
             left: track_left,
@@ -440,6 +521,18 @@ unsafe fn paint(hwnd: HWND) {
             &mut pct_rect,
             DT_SINGLELINE | DT_VCENTER | DT_RIGHT,
         );
+
+        if state.phase == Phase::Done && OPEN_PATH.lock().unwrap().is_some() {
+            SetTextColor(hdc, 0x00EB_6325); // #2563EB, 与品牌蓝一致的可点击提示色
+            let hint = to_wide("🖱 点击打开所在目录");
+            DrawTextW(
+                hdc,
+                hint.as_ptr(),
+                -1,
+                &mut pct_rect,
+                DT_SINGLELINE | DT_VCENTER | DT_LEFT,
+            );
+        }
 
         SelectObject(hdc, old_sub);
         SelectObject(hdc, old_font);

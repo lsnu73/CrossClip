@@ -624,7 +624,17 @@ unsafe extern "system" fn wnd_proc(
                             } else {
                                 p.device_name.clone()
                             };
-                            format!("📱 已连接手机: {} ({})", name, p.ip)
+                            // 品牌与设备名合并展示（如 "vivo V2324A"）；设备名本身已含品牌
+                            // （如 "vivo X100"）时不重复拼接，老版本手机无品牌字段则原样显示
+                            let brand = p.device_brand.trim();
+                            let display = if brand.is_empty()
+                                || name.to_lowercase().starts_with(&brand.to_lowercase())
+                            {
+                                name
+                            } else {
+                                format!("{} {}", brand, name)
+                            };
+                            format!("📱 已连接手机: {} ({})", display, p.ip)
                         }
                         None => "📱 已连接手机: 无".to_string(),
                     };

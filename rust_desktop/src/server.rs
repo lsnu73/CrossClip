@@ -44,6 +44,10 @@ pub struct ClientPeer {
     pub port: u16,
     pub device_id: String,
     pub device_name: String,
+    /// 手机品牌（Build.MANUFACTURER，如 "vivo"/"Xiaomi"）。老版本手机端不上报该字段，
+    /// 缺省为空字符串，托盘展示时自动退化为仅显示设备名。
+    #[serde(default)]
+    pub device_brand: String,
     pub last_seen: u64,
 }
 
@@ -56,6 +60,7 @@ struct AuthRequest {
     client_port: Option<u16>,
     device_id: Option<String>,
     device_name: Option<String>,
+    device_brand: Option<String>,
     timestamp: Option<u64>,
 }
 
@@ -64,6 +69,7 @@ struct AuthChallengePayload {
     timestamp: u64,
     device_id: Option<String>,
     device_name: Option<String>,
+    device_brand: Option<String>,
     client_port: Option<u16>,
 }
 
@@ -73,6 +79,7 @@ struct HeartbeatRequest {
     client_port: Option<u16>,
     device_id: Option<String>,
     device_name: Option<String>,
+    device_brand: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -163,7 +170,7 @@ impl Broadcaster {
         broadcaster
     }
 
-    pub fn register_peer(&self, ip: String, port: u16, device_id: String, device_name: String) {
+    pub fn register_peer(&self, ip: String, port: u16, device_id: String, device_name: String, device_brand: String) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -178,12 +185,16 @@ impl Broadcaster {
             if !device_name.is_empty() {
                 existing.device_name = device_name;
             }
+            if !device_brand.is_empty() {
+                existing.device_brand = device_brand;
+            }
         } else {
             peers.push(ClientPeer {
                 ip,
                 port,
                 device_id,
                 device_name,
+                device_brand,
                 last_seen: now,
             });
         }
@@ -620,7 +631,8 @@ fn handle_client_request(
                     let port = req.client_port.unwrap_or(18237);
                     let dev_id = req.device_id.unwrap_or_default();
                     let dev_name = req.device_name.unwrap_or_default();
-                    broadcaster.register_peer(client_ip, port, dev_id, dev_name);
+                    let dev_brand = req.device_brand.unwrap_or_default();
+                    broadcaster.register_peer(client_ip, port, dev_id, dev_name, dev_brand);
                     let resp = Response::from_string(r#"{"status":"ok"}"#)
                         .with_header(cors_header)
                         .with_header(content_type);
@@ -684,7 +696,8 @@ fn handle_client_request(
         }
 
         // clone 而非 move：这个连接结束时还要用同一个 IP 把自己从 peers 里摘掉
-        broadcaster.register_peer(client_ip.clone(), 18237, "android_phone".to_string(), "安卓手机".to_string());
+        // 此时手机端身份尚未上报，先占位注册，真实名称/品牌由 /auth 与 /heartbeat 刷新
+        broadcaster.register_peer(client_ip.clone(), 18237, "android_phone".to_string(), "安卓手机".to_string(), String::new());
 
         let (tx, rx) = channel::<String>();
         {
@@ -729,6 +742,7 @@ fn handle_client_request(
             let mut client_port = 18237;
             let mut dev_id = "android_phone".to_string();
             let mut dev_name = "安卓手机".to_string();
+            let mut dev_brand = String::new();
 
             if let Ok(req) = auth_req {
                 let now_ms = SystemTime::now()
@@ -750,6 +764,9 @@ fn handle_client_request(
                                 }
                                 if let Some(name) = payload.device_name {
                                     dev_name = name;
+                                }
+                                if let Some(brand) = payload.device_brand {
+                                    dev_brand = brand;
                                 }
                             }
                         }
@@ -779,11 +796,14 @@ fn handle_client_request(
                     if let Some(name) = req.device_name {
                         dev_name = name;
                     }
+                    if let Some(brand) = req.device_brand {
+                        dev_brand = brand;
+                    }
                 }
             }
 
             if is_valid {
-                broadcaster.register_peer(client_ip, client_port, dev_id, dev_name);
+                broadcaster.register_peer(client_ip, client_port, dev_id, dev_name, dev_brand);
 
                 let resp_data = serde_json::to_string(&StatusResponse {
                     status: "ok".to_string(),
@@ -823,7 +843,7 @@ fn handle_client_request(
                 let current_pin = pin_code.read().unwrap().clone();
                 if let Ok(decrypted) = crate::crypto::decrypt(&sync_req.encrypted, &current_pin) {
                     if crate::crypto::compute_hash(&decrypted) == sync_req.hash {
-                        broadcaster.register_peer(client_ip, 18237, "android_phone".to_string(), "安卓手机".to_string());
+                        broadcaster.register_peer(client_ip, 18237, "android_phone".to_string(), "安卓手机".to_string(), String::new());
 
                         crate::clipboard::set_clipboard_text(&decrypted);
 
@@ -987,8 +1007,9 @@ fn handle_client_request(
                 match file_manager.handle_complete(&complete, &current_pin) {
                     Ok((final_path, deduplicated)) => {
                         let path_str = final_path.to_string_lossy().to_string();
-                        // 接收结束：浮窗切到终态（几秒后自动消失），与发送侧表现一致
-                        crate::progress_window::finish(
+                        // 接收结束：浮窗切到终态（几秒后自动消失），与发送侧表现一致。
+                        // 携带落盘路径：点击终态浮窗可直接打开文件所在目录
+                        crate::progress_window::finish_openable(
                             if deduplicated {
                                 "文件已存在，未重复写入"
                             } else {
@@ -996,6 +1017,7 @@ fn handle_client_request(
                             },
                             &path_str,
                             true,
+                            Some(&path_str),
                         );
                         // 通过 SSE 广播文件接收完成事件
                         let complete_event = serde_json::json!({

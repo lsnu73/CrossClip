@@ -191,6 +191,9 @@ class SyncForegroundService : Service() {
 
     private var deviceId: String = "android_phone"
     private var deviceName: String = "安卓手机"
+
+    /** 设备品牌（Build.MANUFACTURER，如 "vivo"/"Xiaomi"），随握手与心跳上报给电脑端托盘展示 */
+    private var deviceBrand: String = ""
     private var autoSync: Boolean = true
 
     /** 是否开启「持续自动搜索电脑」。关闭后需用户手动点击「重新扫描」 */
@@ -421,7 +424,7 @@ class SyncForegroundService : Service() {
         val now = System.currentTimeMillis()
         if (now - lastHeartbeatSentAt < HEARTBEAT_MIN_GAP_MS) return
         lastHeartbeatSentAt = now
-        HttpUploader.sendHeartbeat(currentPcIp, currentHttpPort, pinCode, deviceId, deviceName, 18237) { ok ->
+        HttpUploader.sendHeartbeat(currentPcIp, currentHttpPort, pinCode, deviceId, deviceName, deviceBrand, 18237) { ok ->
             if (ok && connectionState == 1) {
                 val ts = System.currentTimeMillis()
                 val devId = if (currentTargetDeviceId.isNotEmpty()) currentTargetDeviceId else "pc_${currentPcIp.replace('.', '_')}"
@@ -548,6 +551,7 @@ class SyncForegroundService : Service() {
         val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         deviceId = sp.getString("device_id", "android_" + Build.MODEL.replace(" ", "_")) ?: "android"
         deviceName = sp.getString("device_name", Build.MODEL) ?: "安卓手机"
+        deviceBrand = Build.MANUFACTURER
         autoSync = sp.getBoolean("auto_sync", true)
         autoSearchEnabled = sp.getBoolean("auto_search_enabled", true)
         currentTargetDeviceId = sp.getString("last_device_id", "") ?: ""
@@ -848,7 +852,7 @@ class SyncForegroundService : Service() {
             if (finalDevId == currentTargetDeviceId && ip != currentPcIp) {
                 DebugLogger.log("DISCOVERY", "已连接电脑 IP 动态漂移: $currentPcIp -> $ip，触发静默热重连")
                 val token = connectTokenCounter.incrementAndGet()
-                HttpUploader.verifyPin(ip, httpPort, pinCode, deviceId, deviceName, 18237) { success, statusCode, devName, _ ->
+                HttpUploader.verifyPin(ip, httpPort, pinCode, deviceId, deviceName, deviceBrand, 18237) { success, statusCode, devName, _ ->
                     if (token != connectTokenCounter.get()) return@verifyPin
                     mainHandler.post {
                         if (token != connectTokenCounter.get()) return@post
@@ -885,7 +889,7 @@ class SyncForegroundService : Service() {
             val token = connectTokenCounter.incrementAndGet()
             connectionState = -1 // 标记正在后台验证，绝不提前污染 currentPcIp
             DebugLogger.log("DISCOVERY", "目标电脑在线 ($name, $ip, token=$token)，自动执行挑战握手")
-            HttpUploader.verifyPin(ip, httpPort, candidatePin, deviceId, deviceName, 18237) { success, statusCode, devName, retDevId ->
+            HttpUploader.verifyPin(ip, httpPort, candidatePin, deviceId, deviceName, deviceBrand, 18237) { success, statusCode, devName, retDevId ->
                 if (token != connectTokenCounter.get()) {
                     DebugLogger.log("SVC_NET", "丢弃过期握手回调 (token: $token)")
                     return@verifyPin
@@ -1022,7 +1026,7 @@ class SyncForegroundService : Service() {
         }
         editor.apply()
 
-        HttpUploader.verifyPin(ip, httpPort, pin, deviceId, deviceName, 18237) { success, statusCode, devName, retDevId ->
+        HttpUploader.verifyPin(ip, httpPort, pin, deviceId, deviceName, deviceBrand, 18237) { success, statusCode, devName, retDevId ->
             if (token != connectTokenCounter.get()) {
                 DebugLogger.log("SVC_NET", "丢弃过期的 connectWithPin 回调 (token: $token)")
                 return@verifyPin
