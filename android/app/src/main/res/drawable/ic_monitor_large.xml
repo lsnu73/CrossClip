@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 配对码屏居中 hero：46×46 线性显示器（1.6px 描边，无底色） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="46dp" android:height="46dp"
+    android:viewportWidth="46" android:viewportHeight="46">
+    <path
+        android:pathData="M6,15 A3,3 0 0 1 9,12 L37,12 A3,3 0 0 1 40,15 L40,33 A3,3 0 0 1 37,36 L9,36 A3,3 0 0 1 6,33 Z"
+        android:strokeColor="@color/text_primary"
+        android:strokeWidth="1.6"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M16,41 L30,41"
+        android:strokeColor="@color/text_primary"
+        android:strokeWidth="1.6"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M23,24 m-3.2,0 a3.2,3.2 0 1 0 6.4,0 a3.2,3.2 0 1 0 -6.4,0"
+        android:strokeColor="@color/text_primary"
+        android:strokeWidth="1.6"
+        android:fillColor="#00000000" />
+</vector>

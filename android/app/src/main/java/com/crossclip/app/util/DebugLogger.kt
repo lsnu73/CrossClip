@@ -19,10 +19,28 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * 诊断日志的等级。诊断页的筛选 chip 与四级语义色（规范 §1.4）按此渲染：
+ *  - INFO 常规流转
+ *  - OK   成功终态（配对成功 / 校验通过 / 写入成功）
+ *  - WARN 可恢复异常或值得注意的状态（掉线重连、降级路径、兼容兜底）
+ *  - ERR  失败终态（配对码错误 / 校验失败 / 读写异常）
+ */
+enum class LogLevel(val label: String) {
+    INFO("INFO"), OK("OK"), WARN("WARN"), ERR("ERR");
+
+    /** 诊断页日志行里补空格对齐的 3 字符宽度前缀 */
+    fun padded(): String = when (this) {
+        OK -> "OK  "
+        ERR -> "ERR "
+        else -> label
+    }
+}
+
 object DebugLogger {
 
     private const val TAG = "CrossClipDebug"
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault())
+    private val fileFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
     private var internalLogFile: File? = null
     private var externalLogFile: File? = null
 
@@ -33,7 +51,7 @@ object DebugLogger {
         try {
             val appCtx = context.applicationContext
             internalLogFile = File(appCtx.filesDir, "crossclip_debug.log")
-            
+
             val extDir = appCtx.getExternalFilesDir(null)
             if (extDir != null) {
                 externalLogFile = File(extDir, "crossclip_debug.log")
@@ -43,29 +61,56 @@ object DebugLogger {
         }
     }
 
+    // ==================== 写入 API ====================
+    //
+    // 行格式（v2.2 起统一为可解析的紧凑格式，session/进程元信息改由启动行承载）：
+    //   [2026-09-16 09:41:02.118] [INFO] [HEARTBEAT] 消息正文
+    // 诊断页按此正则解析出 时间 / 等级 / 标签 / 正文 四段做分级渲染与筛选；
+    // 旧版多段元信息格式（[+Ns] [S:x] [PID:..]）的行由 [parseLine] 的降级分支兜底。
+
+    /** 常规信息（默认等级） */
+    @JvmStatic
     @Synchronized
-    fun log(tag: String, message: String, throwable: Throwable? = null) {
-        val nowStr = synchronized(dateFormat) { dateFormat.format(Date()) }
-        val elapsedSec = (System.currentTimeMillis() - appStartTimeMs) / 1000
-        val threadName = Thread.currentThread().name
-        val pid = Process.myPid()
-        
-        val sb = StringBuilder()
-        sb.append("[$nowStr] [+$elapsedSec s] [S:$sessionId] [PID:$pid/$threadName] [$tag] $message\n")
+    fun log(tag: String, message: String) = write(tag, message, LogLevel.INFO, null)
+
+    /** 携带异常堆栈的调用：异常必然是值得注意的状态，按 WARN 归级 */
+    @JvmStatic
+    @Synchronized
+    fun log(tag: String, message: String, throwable: Throwable?) =
+        write(tag, message, if (throwable != null) LogLevel.WARN else LogLevel.INFO, throwable)
+
+    /** 显式指定等级 */
+    @JvmStatic
+    @Synchronized
+    fun log(tag: String, message: String, level: LogLevel, throwable: Throwable? = null) =
+        write(tag, message, level, throwable)
+
+    @JvmStatic fun ok(tag: String, message: String) = log(tag, message, LogLevel.OK)
+    @JvmStatic fun warn(tag: String, message: String) = log(tag, message, LogLevel.WARN)
+    @JvmStatic fun err(tag: String, message: String) = log(tag, message, LogLevel.ERR)
+
+    private fun write(tag: String, message: String, level: LogLevel, throwable: Throwable?) {
+        val nowStr = synchronized(fileFormat) { fileFormat.format(Date()) }
+        val entry = StringBuilder()
+            .append('[').append(nowStr).append(']')
+            .append(" [").append(level.label).append(']')
+            .append(" [").append(tag).append("] ")
+            .append(message)
+            .append('\n')
         if (throwable != null) {
             val sw = StringWriter()
             throwable.printStackTrace(PrintWriter(sw))
-            sb.append(sw.toString()).append("\n")
-        }
-        val entry = sb.toString()
-
-        Log.i(TAG, "[$tag] $message")
-        if (throwable != null) {
-            Log.w(TAG, throwable)
+            entry.append(sw.toString()).append('\n')
         }
 
-        writeToFile(internalLogFile, entry)
-        writeToFile(externalLogFile, entry)
+        when (level) {
+            LogLevel.ERR -> Log.e(TAG, "[$tag] $message")
+            LogLevel.WARN -> Log.w(TAG, "[$tag] $message")
+            else -> Log.i(TAG, "[$tag] $message")
+        }
+
+        writeToFile(internalLogFile, entry.toString())
+        writeToFile(externalLogFile, entry.toString())
     }
 
     private fun writeToFile(file: File?, text: String) {
@@ -83,12 +128,83 @@ object DebugLogger {
         } catch (_: Exception) {}
     }
 
-    fun getPrimaryLogFile(): File? {
-        return externalLogFile?.takeIf { it.exists() } ?: internalLogFile
+    // ==================== 读取 / 解析 ====================
+
+    /** 诊断页的一条日志行（正文中的换行已并入 msg，展示时保持原样） */
+    data class LogEntry(
+        val tsDisplay: String,   // HH:mm:ss
+        val level: LogLevel,
+        val tag: String,
+        val msg: String
+    ) {
+        /** 筛选 chip 的类别：同步 / 网络 / 其他（仅「全部」下展示） */
+        val category: String = when {
+            tag in SYNC_TAGS -> "sync"
+            tag in NET_TAGS -> "net"
+            else -> "other"
+        }
     }
 
-    fun getLogFilePath(): String {
-        return externalLogFile?.absolutePath ?: internalLogFile?.absolutePath ?: "未知路径"
+    private val NEW_LINE_RE = Regex(
+        "^\\[(\\d{4}-\\d{2}-\\d{2}) (\\d{2}:\\d{2}:\\d{2})\\.\\d{3}\\] \\[(INFO|OK|WARN|ERR)\\] \\[([A-Za-z0-9_]+)\\] ?(.*)$",
+        RegexOption.DOT_MATCHES_ALL
+    )
+
+    /** 旧版多段元信息格式的兜底解析 */
+    private val LEGACY_LINE_RE = Regex(
+        "^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2})\\.\\d{3}\\] \\[\\+\\d+ s\\] \\[S:[0-9a-f]+\\] \\[PID:\\d+/([^\\]]*)\\] \\[([A-Za-z0-9_]+)\\] ?(.*)$",
+        RegexOption.DOT_MATCHES_ALL
+    )
+
+    fun parseLine(line: String): LogEntry? {
+        NEW_LINE_RE.find(line)?.let { m ->
+            return LogEntry(
+                tsDisplay = m.groupValues[2],
+                level = LogLevel.entries.firstOrNull { it.label == m.groupValues[3] } ?: LogLevel.INFO,
+                tag = m.groupValues[4],
+                msg = m.groupValues[5]
+            )
+        }
+        LEGACY_LINE_RE.find(line)?.let { m ->
+            val hasStack = line.contains("Exception") || line.contains("at java.") ||
+                line.contains("at android.")
+            return LogEntry(
+                tsDisplay = m.groupValues[1].substringAfter(' '),
+                level = if (hasStack) LogLevel.WARN else LogLevel.INFO,
+                tag = m.groupValues[3],
+                msg = m.groupValues[4]
+            )
+        }
+        return null
+    }
+
+    /**
+     * 读取日志尾部并解析为结构化行（非日志内容的行——如堆栈续行——并入前一条消息）。
+     * @param maxLines 最多返回的**已解析**条数
+     */
+    @Synchronized
+    fun readParsedTail(maxLines: Int = 500): List<LogEntry> {
+        val file = getPrimaryLogFile() ?: return emptyList()
+        return try {
+            if (!file.exists()) return emptyList()
+            // 堆栈续行会成倍放大行数，这里多读 3 倍的原始行再解析
+            val rawLines = file.readLines().takeLast(maxLines * 3)
+            val result = ArrayList<LogEntry>(maxLines)
+            for (line in rawLines) {
+                val parsed = parseLine(line)
+                if (parsed != null) {
+                    result.add(parsed)
+                } else if (result.isNotEmpty()) {
+                    // 堆栈 / 多行消息的续行：并入上一条
+                    val last = result.removeAt(result.size - 1)
+                    result.add(last.copy(msg = last.msg + "\n" + line))
+                }
+            }
+            if (result.size > maxLines) result.subList(result.size - maxLines, result.size)
+            result
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
 
     @Synchronized
@@ -114,6 +230,13 @@ object DebugLogger {
         }
     }
 
+    /** 日志文件体积（字节），主选外置文件不存在时按内置文件计 */
+    @Synchronized
+    fun getLogFileSizeBytes(): Long {
+        val file = getPrimaryLogFile() ?: return 0L
+        return try { if (file.exists()) file.length() else 0L } catch (_: Exception) { 0L }
+    }
+
     @Synchronized
     fun clear(): Boolean {
         return try {
@@ -124,6 +247,14 @@ object DebugLogger {
         } catch (e: Exception) {
             false
         }
+    }
+
+    fun getPrimaryLogFile(): File? {
+        return externalLogFile?.takeIf { it.exists() } ?: internalLogFile
+    }
+
+    fun getLogFilePath(): String {
+        return externalLogFile?.absolutePath ?: internalLogFile?.absolutePath ?: "未知路径"
     }
 
     fun shareLogFile(context: Context) {
@@ -207,10 +338,22 @@ object DebugLogger {
         }
     }
 
+    /** 「同步」类别覆盖的标签：剪贴板监听 / 收发 / 文件传输落盘 */
+    private val SYNC_TAGS = setOf(
+        "CLIP_SYS", "CLIP_SHIZUKU", "CLIP_DETECT", "CLIP_RECV", "CLIP_WRITE",
+        "SVC_SEND", "SVC_MANUAL", "FILE_RECEIVE", "DIAG_CHUNK", "DIAG_COMPLETE",
+        "SHARE_SEND", "DIAG_NOTIFY", "SVC_NOTIFY"
+    )
+
+    /** 「网络」类别覆盖的标签：发现 / 长连接 / 心跳 / 本地 HTTP */
+    private val NET_TAGS = setOf(
+        "DISCOVERY", "SVC_NET", "HEARTBEAT", "LOCAL_HTTP"
+    )
+
     fun setupCrashHandler() {
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            log("CRASH", "捕获未捕获异常: 线程=${thread.name}", throwable)
+            log("CRASH", "捕获未捕获异常: 线程=${thread.name}", LogLevel.ERR, throwable)
             defaultHandler?.uncaughtException(thread, throwable)
         }
     }
@@ -276,7 +419,7 @@ object DebugLogger {
             }
             log("EXIT_REASON", "==================================================")
         } catch (e: Throwable) {
-            log("EXIT_REASON", "提取历史进程退出记录异常: ${e.javaClass.simpleName}: ${e.message}")
+            log("EXIT_REASON", "提取历史进程退出记录异常: ${e.javaClass.simpleName}: ${e.message}", LogLevel.WARN, e)
         }
     }
 

@@ -6,95 +6,90 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.app.AlertDialog
-import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
-import android.text.Editable
-import android.text.TextWatcher
 import android.view.View
-import android.widget.Button
-import android.widget.EditText
-import android.widget.ImageView
-import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.SwitchCompat
 import androidx.core.app.NotificationManagerCompat
 import com.crossclip.app.R
 import com.crossclip.app.BuildConfig
 import com.crossclip.app.service.SyncForegroundService
 import com.crossclip.app.shizuku.ShizukuClipboardManager
-import com.crossclip.app.util.PermissionHelper
 import com.crossclip.app.util.DebugLogger
+import com.crossclip.app.util.PermissionHelper
 import com.crossclip.app.util.SaveDirManager
+import com.crossclip.app.util.SyncStats
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import rikka.shizuku.Shizuku
+import java.io.File
+import java.util.Locale
 
+/**
+ * 屏 1 · 设置（hub，栈底）。
+ *
+ * 按《CrossClip-最终规范与AI提示词.md》复原：白底直铺的连接总览 hero + 单行设置列表 +
+ * ⓘ 折叠说明 + 底部居中下划线诊断入口。连接/设备状态每 1.5 秒自前台服务轮询刷新。
+ */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var tvStatus: TextView
-    private lateinit var tvAppTitle: TextView
-    private lateinit var tvVersionBadge: TextView
-    private lateinit var tvDiscoveredDevice: TextView
-    private lateinit var btnSwitchDevice: TextView
-    private lateinit var llDeviceHeader: View
-    /** 「重新扫描」按钮容器（含旋转箭头与文案）；点击区域覆盖整个按钮，而不只是文字 */
-    private lateinit var btnRefreshScan: View
-    private lateinit var etPinCode: EditText
-    private lateinit var ivClearPin: ImageView
-    private lateinit var btnConnectPc: Button
-    private lateinit var tvToggleManualIp: TextView
-    private lateinit var llManualIpContainer: LinearLayout
-    private lateinit var etManualIp: EditText
-    private lateinit var btnApplyManualIp: Button
+    private lateinit var tvConnTag: TextView
+    private lateinit var tvDeviceName: TextView
+    private lateinit var tvDeviceIp: TextView
+    private lateinit var codeRow: View
+    private lateinit var tvPairingCode: TextView
+    private lateinit var btnDisconnect: TextView
+    private lateinit var btnConnectHero: TextView
+    private lateinit var tvStats: TextView
 
-    private lateinit var switchAutoSync: SwitchCompat
-    private lateinit var btnLockTaskGuide: Button
-    private lateinit var switchHideRecents: SwitchCompat
-
-    // 自动搜索开关（省电）
-    private lateinit var switchAutoSearch: SwitchCompat
+    private lateinit var rowAutoSync: View
+    private lateinit var switchAutoSync: androidx.appcompat.widget.SwitchCompat
+    private lateinit var tvAutoSyncDesc: TextView
+    private lateinit var rowAutoSearch: View
+    private lateinit var switchAutoSearch: androidx.appcompat.widget.SwitchCompat
     private lateinit var tvAutoSearchDesc: TextView
-
-    // 通知权限检测
-    private lateinit var tvNotificationBadge: TextView
-    private lateinit var btnNotificationPerm: Button
-
-    // 接收文件保存目录
+    private lateinit var rowManualSend: View
+    private lateinit var rowHideRecents: View
+    private lateinit var switchHideRecents: androidx.appcompat.widget.SwitchCompat
+    private lateinit var rowLockTask: View
+    private lateinit var rowNotification: View
+    private lateinit var tvNotificationValue: TextView
     private lateinit var tvSaveDirPath: TextView
-    private lateinit var btnChangeSaveDir: Button
+    private lateinit var btnChangeDir: TextView
     private lateinit var tvResetSaveDir: TextView
-
-    private lateinit var tvShizukuBadge: TextView
-    private lateinit var tvShizukuDesc: TextView
-    private lateinit var tvShizukuDebug: TextView
-    private lateinit var btnShizukuAuth: Button
-    private lateinit var cardManualSync: View
-    private lateinit var btnTestSend: Button
-    private lateinit var btnClipboardPerm: Button
-    private lateinit var btnBatteryPerm: Button
-    private lateinit var btnAutoStartPerm: Button
-    private lateinit var llShizukuDebugContainer: LinearLayout
-    private lateinit var tvCollapseDebug: TextView
-    private val collapseDebugRunnable = Runnable {
-        llShizukuDebugContainer.visibility = View.GONE
-    }
-
-    private lateinit var tvLogFilePath: TextView
-    private lateinit var btnViewLogs: Button
-    private lateinit var btnCopyLogs: Button
-    private lateinit var btnExportLogs: Button
-    private lateinit var btnClearLogs: Button
+    private lateinit var tvCacheSize: TextView
+    private lateinit var btnClearCache: TextView
+    private lateinit var rowShizuku: View
+    private lateinit var tvShizukuValue: TextView
+    private lateinit var rowBattery: View
+    private lateinit var rowAutostart: View
+    private lateinit var tvDiagEntry: TextView
+    private lateinit var tvFooter: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private var isDestroyedActivity = false
-
-    /** 初始化阶段回填控件状态时置为 true，避免误触发开关的切换副作用 */
     private var isInitializingUi = false
+
+    /** ⓘ 图标 → 说明条 的对应关系；互斥展开由 [toggleExplain] 保证 */
+    private val explainMap = linkedMapOf(
+        R.id.info_auto to R.id.ex_auto,
+        R.id.info_search to R.id.ex_search,
+        R.id.info_hide to R.id.ex_hide,
+        R.id.info_lock to R.id.ex_lock,
+        R.id.info_notice to R.id.ex_notice,
+        R.id.info_dir to R.id.ex_dir,
+        R.id.info_cache to R.id.ex_cache,
+        R.id.info_shizuku to R.id.ex_shizuku,
+        R.id.info_battery to R.id.ex_battery,
+        R.id.info_autostart to R.id.ex_autostart
+    )
 
     /**
      * 目录选择器：用于让用户自定义「接收文件保存目录」。
@@ -114,7 +109,7 @@ class MainActivity : AppCompatActivity() {
     private val notificationPermLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        updateNotificationBadge()
+        updateNotificationRow()
         Toast.makeText(
             this,
             if (granted) "通知权限已开启，可正常显示文件传输进度" else "未授予通知权限，文件传输进度将无法在通知栏展示",
@@ -124,10 +119,10 @@ class MainActivity : AppCompatActivity() {
 
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { _, grantResult ->
         runOnUiThread {
-            updateShizukuUI()
+            updateShizukuRow()
             if (grantResult == PackageManager.PERMISSION_GRANTED) {
                 ShizukuClipboardManager.onPermissionGranted()
-                DebugLogger.log("UI", "Shizuku 特权授权成功")
+                DebugLogger.ok("UI", "Shizuku 特权授权成功")
                 Toast.makeText(this, "Shizuku 特权授权成功！已开启系统级静默后台互传", Toast.LENGTH_LONG).show()
             }
         }
@@ -136,9 +131,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-
-        // 不主动弹窗强行索取通知权限，若用户未授予通知权限，系统将天然不在通知中心展示常驻通知，前台服务仍可正常保活运行
-        // 用户若需要通知可在系统设置中随时开启
 
         try {
             Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
@@ -152,13 +144,15 @@ class MainActivity : AppCompatActivity() {
         applyHideFromRecentsPreference()
         startSyncService()
         startStatusPolling()
-        runShizukuSelfTest()
         promptMiuiKeepAliveIfNeeded()
     }
 
     override fun onResume() {
         super.onResume()
         applyHideFromRecentsPreference()
+        updateSaveDirUI()
+        updateNotificationRow()
+        refreshCacheSize()
     }
 
     private fun applyHideFromRecentsPreference() {
@@ -174,220 +168,125 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ==================== 视图绑定与基础接线 ====================
+
     private fun initViews() {
-        tvAppTitle = findViewById(R.id.tv_app_title)
-        tvVersionBadge = findViewById(R.id.tv_version_badge)
-        tvVersionBadge.text = "v${BuildConfig.VERSION_NAME}"
-        tvStatus = findViewById(R.id.tv_status)
-        tvDiscoveredDevice = findViewById(R.id.tv_discovered_device)
-        btnSwitchDevice = findViewById(R.id.btn_switch_device)
-        llDeviceHeader = findViewById(R.id.ll_device_header)
-        btnRefreshScan = findViewById(R.id.btn_refresh_scan)
-        etPinCode = findViewById(R.id.et_pin_code)
-        ivClearPin = findViewById(R.id.iv_clear_pin)
-        btnConnectPc = findViewById(R.id.btn_connect_pc)
+        tvConnTag = findViewById(R.id.tv_conn_tag)
+        tvDeviceName = findViewById(R.id.tv_device_name)
+        tvDeviceIp = findViewById(R.id.tv_device_ip)
+        codeRow = findViewById(R.id.code_row)
+        tvPairingCode = findViewById(R.id.tv_pairing_code)
+        btnDisconnect = findViewById(R.id.btn_disconnect)
+        btnConnectHero = findViewById(R.id.btn_connect_hero)
+        tvStats = findViewById(R.id.tv_stats)
 
-        // PIN 输入框清除按钮：显隐由 TextWatcher 驱动（覆盖程序化 setText 的所有场景），
-        // 可点性随输入框启用状态走（已连接时输入框被禁用 → 图标置灰不可点）。
-        // 点击清空并让输入框重新获得焦点，方便直接输入新码
-        etPinCode.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) {
-                updateClearPinState()
-            }
-        })
-        ivClearPin.setOnClickListener {
-            etPinCode.setText("")
-            etPinCode.requestFocus()
-        }
-        updateClearPinState()
-        tvToggleManualIp = findViewById(R.id.tv_toggle_manual_ip)
-        llManualIpContainer = findViewById(R.id.ll_manual_ip_container)
-        etManualIp = findViewById(R.id.et_manual_ip)
-        btnApplyManualIp = findViewById(R.id.btn_apply_manual_ip)
-
-        val onDeviceSelectClick = View.OnClickListener {
-            showDeviceSelectionDialog()
-        }
-        btnSwitchDevice.setOnClickListener(onDeviceSelectClick)
-        llDeviceHeader.setOnClickListener(onDeviceSelectClick)
-
+        rowAutoSync = findViewById(R.id.row_auto_sync)
         switchAutoSync = findViewById(R.id.switch_auto_sync)
-        btnLockTaskGuide = findViewById(R.id.btn_lock_task_guide)
-        switchHideRecents = findViewById(R.id.switch_hide_recents)
-
-        // 自动搜索 / 通知权限 / 保存目录 相关控件
+        tvAutoSyncDesc = findViewById(R.id.tv_auto_sync_desc)
+        rowAutoSearch = findViewById(R.id.row_auto_search)
         switchAutoSearch = findViewById(R.id.switch_auto_search)
         tvAutoSearchDesc = findViewById(R.id.tv_auto_search_desc)
-        tvNotificationBadge = findViewById(R.id.tv_notification_badge)
-        btnNotificationPerm = findViewById(R.id.btn_notification_perm)
+        rowManualSend = findViewById(R.id.row_manual_send)
+        rowHideRecents = findViewById(R.id.row_hide_recents)
+        switchHideRecents = findViewById(R.id.switch_hide_recents)
+        rowLockTask = findViewById(R.id.row_lock_task)
+        rowNotification = findViewById(R.id.row_notification)
+        tvNotificationValue = findViewById(R.id.tv_notification_value)
         tvSaveDirPath = findViewById(R.id.tv_save_dir_path)
-        btnChangeSaveDir = findViewById(R.id.btn_change_save_dir)
+        btnChangeDir = findViewById(R.id.btn_change_dir)
         tvResetSaveDir = findViewById(R.id.tv_reset_save_dir)
+        tvCacheSize = findViewById(R.id.tv_cache_size)
+        btnClearCache = findViewById(R.id.btn_clear_cache)
+        rowShizuku = findViewById(R.id.row_shizuku)
+        tvShizukuValue = findViewById(R.id.tv_shizuku_value)
+        rowBattery = findViewById(R.id.row_battery)
+        rowAutostart = findViewById(R.id.row_autostart)
+        tvDiagEntry = findViewById(R.id.tv_diag_entry)
+        tvFooter = findViewById(R.id.tv_footer)
 
-        tvShizukuBadge = findViewById(R.id.tv_shizuku_badge)
-        tvShizukuDesc = findViewById(R.id.tv_shizuku_desc)
-        tvShizukuDebug = findViewById(R.id.tv_shizuku_debug)
-        btnShizukuAuth = findViewById(R.id.btn_shizuku_auth)
-        cardManualSync = findViewById(R.id.card_manual_sync)
-        btnTestSend = findViewById(R.id.btn_test_send)
-        btnClipboardPerm = findViewById(R.id.btn_clipboard_perm)
-        btnBatteryPerm = findViewById(R.id.btn_battery_perm)
-        btnAutoStartPerm = findViewById(R.id.btn_autostart_perm)
-        llShizukuDebugContainer = findViewById(R.id.ll_shizuku_debug_container)
-        tvCollapseDebug = findViewById(R.id.tv_collapse_debug)
+        tvFooter.text = "CrossClip v${BuildConfig.VERSION_NAME} · build ${BuildConfig.VERSION_CODE}"
 
-        tvLogFilePath = findViewById(R.id.tv_log_file_path)
-        btnViewLogs = findViewById(R.id.btn_view_logs)
-        btnCopyLogs = findViewById(R.id.btn_copy_logs)
-        btnExportLogs = findViewById(R.id.btn_export_logs)
-        btnClearLogs = findViewById(R.id.btn_clear_logs)
-
-        tvLogFilePath.text = "日志路径（点击用其他应用打开所在目录）: ${DebugLogger.getLogFilePath()}"
-        // 点击路径 → 用其他应用打开日志所在目录（已删除「复制日志路径」逻辑）
-        tvLogFilePath.setOnClickListener {
-            openLogDirWithOtherApps()
+        // 诊断入口：居中下划线 → 二级页
+        tvDiagEntry.paintFlags = tvDiagEntry.paintFlags or Paint.UNDERLINE_TEXT_FLAG
+        tvDiagEntry.setOnClickListener {
+            startActivity(Intent(this, DiagnosticsActivity::class.java))
         }
 
-        btnViewLogs.setOnClickListener {
-            showLogsDialog()
+        // ⓘ 功能说明：互斥展开，不占额外行高
+        explainMap.forEach { (infoId, exId) ->
+            findViewById<View>(infoId).setOnClickListener { toggleExplain(infoId, exId) }
         }
 
-        btnCopyLogs.setOnClickListener {
-            val allLogs = DebugLogger.readAll()
-            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-            cm.setPrimaryClip(ClipData.newPlainText("CrossClip Logs", allLogs))
-            Toast.makeText(this, "已将全量运行日志复制到剪贴板", Toast.LENGTH_SHORT).show()
-        }
-
-        btnExportLogs.setOnClickListener {
-            DebugLogger.shareLogFile(this)
-        }
-
-        btnClearLogs.setOnClickListener {
-            DebugLogger.clear()
-            Toast.makeText(this, "日志已清空", Toast.LENGTH_SHORT).show()
-        }
-
-        btnShizukuAuth.setOnClickListener {
-            when (ShizukuClipboardManager.getState()) {
-                ShizukuClipboardManager.State.READY -> {
-                    handler.removeCallbacks(collapseDebugRunnable)
-                    llShizukuDebugContainer.visibility = View.VISIBLE
-                    tvShizukuDebug.text = "正在自检 Shizuku 读写链路..."
-                    Thread {
-                        SyncForegroundService.instance?.setSelfTestWriteMode(true)
-                        val result = try {
-                            ShizukuClipboardManager.debugFullSelfTest()
-                        } finally {
-                            SyncForegroundService.instance?.setSelfTestWriteMode(false)
-                        }
-                        runOnUiThread {
-                            tvShizukuDebug.text = result
-                            // 展示 8 秒后自动收起
-                            handler.postDelayed(collapseDebugRunnable, 8000L)
-                        }
-                    }.start()
+        // ---------- 连接总览 ----------
+        btnDisconnect.setOnClickListener {
+            val service = SyncForegroundService.instance ?: return@setOnClickListener
+            val devName = service.currentPcName.ifEmpty { "电脑" }
+            AlertDialog.Builder(this)
+                .setTitle("断开与 $devName 的连接？")
+                .setMessage("断开后需重新输入配对码，正在传输的内容会被中断。")
+                .setPositiveButton("断开") { _, _ ->
+                    service.disconnectCurrentPc()
+                    DebugLogger.warn("UI", "用户在设置页确认断开连接")
+                    Toast.makeText(this, "已断开连接", Toast.LENGTH_SHORT).show()
+                    refreshHero()
                 }
-                ShizukuClipboardManager.State.UNAUTHORIZED -> {
-                    ShizukuClipboardManager.requestPermission()
-                }
-                ShizukuClipboardManager.State.NOT_RUNNING -> {
-                    try {
-                        val launchIntent = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
-                        if (launchIntent != null) {
-                            startActivity(launchIntent)
-                        } else {
-                            Toast.makeText(this, "未检测到 Shizuku 应用，请先安装并启动 Shizuku", Toast.LENGTH_LONG).show()
-                        }
-                    } catch (e: Exception) {
-                        Toast.makeText(this, "未检测到 Shizuku，当前使用标准兼容模式", Toast.LENGTH_LONG).show()
-                    }
-                }
-            }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+        btnConnectHero.setOnClickListener {
+            startActivity(Intent(this, PairingActivity::class.java))
         }
 
-        btnRefreshScan.setOnClickListener {
-            // 点击反馈改为「箭头旋转 + 文案切换为正在扫描中」(见 ScanRefreshController)；
-            // 原先在此弹出的底部 Toast 与旋转变达的是同一件事，重复提示既遮挡视线又转瞬即逝，已移除。
-            ScanRefreshController.onScanClicked(this)
-            val service = SyncForegroundService.instance
-            if (service != null) {
-                service.triggerRescan()
-            } else {
-                startSyncService()
-            }
-        }
-
-        tvToggleManualIp.setOnClickListener {
-            if (llManualIpContainer.visibility == View.VISIBLE) {
-                llManualIpContainer.visibility = View.GONE
-            } else {
-                llManualIpContainer.visibility = View.VISIBLE
-            }
-        }
-
-        btnApplyManualIp.setOnClickListener {
-            val ip = etManualIp.text.toString().trim()
-            if (ip.isEmpty()) {
-                Toast.makeText(this, "请输入电脑的有效 IP 地址", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            val service = SyncForegroundService.instance
-            if (service != null) {
-                val pin = etPinCode.text.toString().trim()
-                service.connectWithPin(ip, pin) { success, statusCode, name ->
-                    if (success) {
-                        Toast.makeText(this, "成功连接到电脑: $name", Toast.LENGTH_SHORT).show()
-                    } else if (statusCode == 403) {
-                        Toast.makeText(this, "PIN 码不匹配，请查看电脑托盘显示的 6 位数", Toast.LENGTH_LONG).show()
-                    } else {
-                        Toast.makeText(this, "连接超时，请确认 IP 是否正确且已启动 CrossClip", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }
-
+        // ---------- 同步 ----------
         switchAutoSync.setOnCheckedChangeListener { _, isChecked ->
-            cardManualSync.visibility = if (isChecked) View.GONE else View.VISIBLE
+            if (isInitializingUi) return@setOnCheckedChangeListener
             val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
             sp.edit().putBoolean("auto_sync", isChecked).apply()
+            rowManualSend.visibility = if (isChecked) View.GONE else View.VISIBLE
+            DebugLogger.log("SVC_ACTION", "自动互传模式变更为: ${if (isChecked) "开启" else "关闭"}")
             startSyncService()
         }
-
-        btnLockTaskGuide.setOnClickListener {
-            showLockTaskGuideDialog()
-        }
-
-        switchHideRecents.setOnCheckedChangeListener { _, isChecked ->
-            val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
-            sp.edit().putBoolean("hide_recents", isChecked).apply()
-            applyHideFromRecentsPreference()
-            if (isChecked) {
-                Toast.makeText(this, "已开启最近任务隐藏，退至桌面后在多任务中隐身，彻底免疫一键清理", Toast.LENGTH_LONG).show()
+        rowAutoSync.setOnClickListener {
+            // 未连接锁定（规范 §3.2）：点击拦截并提示
+            if (SyncForegroundService.instance?.connectionState != 1) {
+                Toast.makeText(this, "未连接设备，该开关暂不可用", Toast.LENGTH_SHORT).show()
             } else {
-                Toast.makeText(this, "最近任务隐藏已关闭", Toast.LENGTH_SHORT).show()
+                switchAutoSync.toggle()
             }
         }
+        rowManualSend.setOnClickListener {
+            SyncForegroundService.instance?.sendCurrentClipboardManual()
+                ?: Toast.makeText(this, "后台服务未就绪，正在拉起...", Toast.LENGTH_SHORT).show()
+        }
 
-        // ---------- 自动搜索开关（省电策略） ----------
         switchAutoSearch.setOnCheckedChangeListener { _, isChecked ->
-            // 初始化回填状态时不应触发真实切换（否则会重启搜索并弹出 Toast）
             if (isInitializingUi) return@setOnCheckedChangeListener
             SyncForegroundService.instance?.setAutoSearchEnabled(isChecked)
-            refreshAutoSearchUI(isChecked)
-            // 立即刷新主页状态文案，避免开关已关闭但文案仍显示「搜索中」造成困惑
-            refreshStatusFromService()
+            refreshAutoSearchDesc(isChecked)
+            DebugLogger.log("SVC_ACTION", "自动搜索电脑变更为: ${if (isChecked) "开启" else "关闭"}")
             Toast.makeText(
                 this,
-                if (isChecked) "已开启自动搜索电脑" else "已关闭自动搜索，可点击「重新扫描」手动查找",
+                if (isChecked) "已开启自动搜索电脑" else "已关闭自动搜索，可到「电脑配对」手动查找",
                 Toast.LENGTH_SHORT
             ).show()
         }
 
-        // ---------- 通知权限检测 ----------
-        btnNotificationPerm.setOnClickListener {
+        // ---------- 隐私与显示 ----------
+        switchHideRecents.setOnCheckedChangeListener { _, isChecked ->
+            if (isInitializingUi) return@setOnCheckedChangeListener
+            val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
+            sp.edit().putBoolean("hide_recents", isChecked).apply()
+            applyHideFromRecentsPreference()
+            Toast.makeText(
+                this,
+                if (isChecked) "已开启最近任务隐藏，退至桌面后在多任务中隐身，彻底免疫一键清理" else "最近任务隐藏已关闭",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
+        rowLockTask.setOnClickListener { showLockTaskGuideDialog() }
+
+        rowNotification.setOnClickListener {
             if (isNotificationEnabled()) {
                 Toast.makeText(this, "通知权限已开启，文件传输进度可正常展示", Toast.LENGTH_SHORT).show()
             } else {
@@ -395,16 +294,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ---------- 接收文件保存目录 ----------
-        btnChangeSaveDir.setOnClickListener {
-            // 调起系统文件选择器（SAF）让用户挑选目录
+        // ---------- 存储 ----------
+        btnChangeDir.setOnClickListener {
             try {
                 pickSaveDirLauncher.launch(null)
             } catch (e: Exception) {
                 Toast.makeText(this, "无法打开目录选择器: ${e.message}", Toast.LENGTH_SHORT).show()
             }
         }
-
         tvSaveDirPath.setOnClickListener {
             // 单击：用默认应用直接打开（首次点击会先弹选择器，选中即设为默认）
             openSaveDirWithOtherApps(forceChooser = false)
@@ -414,212 +311,157 @@ class MainActivity : AppCompatActivity() {
             openSaveDirWithOtherApps(forceChooser = true)
             true
         }
-
         tvResetSaveDir.setOnClickListener {
             SaveDirManager.resetToDefault(this)
             updateSaveDirUI()
             Toast.makeText(this, "已恢复默认保存目录", Toast.LENGTH_SHORT).show()
         }
 
-        btnConnectPc.setOnClickListener {
-            val service = SyncForegroundService.instance
-            if (service == null) {
-                Toast.makeText(this, "后台服务启动中，请稍候...", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
+        btnClearCache.setOnClickListener { confirmClearCache() }
 
-            if (service.connectionState == 1) {
-                service.disconnectCurrentPc()
-                etPinCode.isEnabled = true
-                updateClearPinState()
-                etPinCode.setText("")
-                btnConnectPc.text = "一键连接"
-                Toast.makeText(this, "已断开与电脑的连接", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-
-            val pin = etPinCode.text.toString().trim()
-            if (pin.isEmpty()) {
-                Toast.makeText(this, "请输入电脑托盘显示的 6 位 PIN 码", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-
-            var targetIp = service.currentPcIp
-            if (targetIp.isEmpty()) {
-                val manualIp = etManualIp.text.toString().trim()
-                if (manualIp.isNotEmpty()) {
-                    targetIp = manualIp
-                }
-            }
-
-            if (targetIp.isEmpty()) {
-                Toast.makeText(this, "尚未搜到电脑，请确保电脑已启动 CrossClip，或点击下方手动输入电脑 IP", Toast.LENGTH_LONG).show()
-                llManualIpContainer.visibility = View.VISIBLE
-                return@setOnClickListener
-            }
-
-            btnConnectPc.isEnabled = false
-            btnConnectPc.text = "配对中..."
-
-            service.connectWithPin(targetIp, pin) { success, statusCode, name ->
-                btnConnectPc.isEnabled = true
-                if (success) {
-                    btnConnectPc.text = "断开连接"
-                    etPinCode.isEnabled = false
-                    updateClearPinState()
-                    Toast.makeText(this, "配对成功！设备: $name", Toast.LENGTH_SHORT).show()
-                } else if (statusCode == 403) {
-                    btnConnectPc.text = "一键连接"
-                    etPinCode.isEnabled = true
-                    updateClearPinState()
-                    Toast.makeText(this, "PIN 码不匹配！电脑端已生成新 PIN 码，请右键电脑右下角托盘查看", Toast.LENGTH_LONG).show()
-                } else {
-                    btnConnectPc.text = "一键连接"
-                    etPinCode.isEnabled = true
-                    updateClearPinState()
-                    Toast.makeText(this, "连接超时，请确认手机和电脑在同一局域网", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        btnTestSend.setOnClickListener {
-            SyncForegroundService.instance?.sendCurrentClipboardManual()
-                ?: Toast.makeText(this, "后台服务未就绪，正在拉起...", Toast.LENGTH_SHORT).show()
-        }
-
-        btnClipboardPerm.setOnClickListener {
-            PermissionHelper.openClipboardPermissionSetting(this)
-        }
-
-        btnBatteryPerm.setOnClickListener {
+        // ---------- 系统权限 ----------
+        rowShizuku.setOnClickListener { onShizukuRowClicked() }
+        rowBattery.setOnClickListener {
             PermissionHelper.openBatteryKeepAliveSettings(this)
         }
-
-        btnAutoStartPerm.setOnClickListener {
+        rowAutostart.setOnClickListener {
             PermissionHelper.openAutoStartPermissionSetting(this)
         }
 
-        tvCollapseDebug.setOnClickListener {
-            handler.removeCallbacks(collapseDebugRunnable)
-            llShizukuDebugContainer.visibility = View.GONE
-        }
-
-        tvShizukuDebug.setOnClickListener {
-            showLogsDialog()
-        }
-    }
-
-    private fun showLogsDialog() {
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("CrossClip 运行日志 (最新 200 行)")
-            .setMessage(DebugLogger.readTail(200))
-            .setPositiveButton("确定", null)
-            .setNegativeButton("复制全部") { _, _ ->
-                val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("CrossClip Logs", DebugLogger.readAll()))
-                Toast.makeText(this, "已复制全部日志", Toast.LENGTH_SHORT).show()
-            }
-            .setNeutralButton("导出文件") { _, _ ->
-                DebugLogger.shareLogFile(this)
-            }
-            .create()
-        dialog.show()
-    }
-
-    private fun showLockTaskGuideDialog() {
-        val guideMessage = StringBuilder()
-            .append("在系统多任务切换界面（近期任务）为 CrossClip 应用卡片加锁，可彻底防止系统清理后台或一键清理全部任务时误杀同步进程：\n\n")
-            .append("1. 小米、澎湃 OS (HyperOS / MIUI)：\n")
-            .append("   从屏幕底部上滑悬停进入多任务，长按 CrossClip 卡片，点击弹出菜单中的锁头图标；部分版本亦可直接向下拉动卡片加锁。\n\n")
-            .append("2. OPPO、一加、真我 (ColorOS / RealmeUI)：\n")
-            .append("   进入多任务后台，点击 CrossClip 卡片右上角设置菜单（三点图标），点击【锁定】。\n\n")
-            .append("3. vivo、iQOO (OriginOS)：\n")
-            .append("   进入多任务后台，向下拉动 CrossClip 卡片，卡片出现小锁图标即锁定成功。\n\n")
-            .append("4. 华为、荣耀 (HarmonyOS / MagicOS)：\n")
-            .append("   进入多任务后台，向下拉动 CrossClip 卡片，卡片出现锁头标记即锁定完成。\n\n")
-            .append("提示：若开启了下方的【多任务隐藏】，多任务栏将不会展示本应用卡片。建议保持多任务可见并给卡片加锁，兼顾后台驻留与防误杀。")
-            .toString()
-
-        AlertDialog.Builder(this)
-            .setTitle("多任务卡片加锁操作指引")
-            .setMessage(guideMessage)
-            .setPositiveButton("知道了", null)
-            .show()
-    }
-
-    /**
-     * 同步 PIN 清除图标状态：
-     *  - 输入框有内容才显示，空态恢复纯输入框样式（覆盖程序化 setText 的所有场景）；
-     *  - 已连接时输入框被禁用（etPinCode.isEnabled=false），图标同步置灰且不可点击 ——
-     *    此时框里的 PIN 是当前连接的记忆，不允许随手清掉。
-     * 须在 TextWatcher 与所有 etPinCode.isEnabled 变更点之后调用。
-     */
-    private fun updateClearPinState() {
-        ivClearPin.visibility = if (etPinCode.text.isNotEmpty()) View.VISIBLE else View.GONE
-        val clickable = etPinCode.isEnabled
-        ivClearPin.isEnabled = clickable
-        ivClearPin.alpha = if (clickable) 1f else 0.35f
+        findViewById<TextView>(R.id.btn_about).setOnClickListener { showAboutSheet() }
     }
 
     private fun loadConfig() {
         val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
-        val isAuto = sp.getBoolean("auto_sync", true)
-        switchAutoSync.isChecked = isAuto
-        switchHideRecents.isChecked = sp.getBoolean("hide_recents", false)
-        cardManualSync.visibility = if (isAuto) View.GONE else View.VISIBLE
-
-        val savedPin = sp.getString("pin_code", "") ?: ""
-        if (savedPin.isNotEmpty()) {
-            etPinCode.setText(savedPin)
-        }
-
-        val lastIp = sp.getString("last_pc_ip", "") ?: ""
-        if (lastIp.isNotEmpty()) {
-            etManualIp.setText(lastIp)
-        }
-
-        // 自动搜索开关（默认开启）
-        val autoSearch = sp.getBoolean("auto_search_enabled", true)
         isInitializingUi = true
-        switchAutoSearch.isChecked = autoSearch
+        switchAutoSync.isChecked = sp.getBoolean("auto_sync", true)
+        switchHideRecents.isChecked = sp.getBoolean("hide_recents", false)
+        switchAutoSearch.isChecked = sp.getBoolean("auto_search_enabled", true)
         isInitializingUi = false
-        refreshAutoSearchUI(autoSearch)
+        rowManualSend.visibility = if (sp.getBoolean("auto_sync", true)) View.GONE else View.VISIBLE
+        refreshAutoSearchDesc(sp.getBoolean("auto_search_enabled", true))
 
-        // 保存目录与通知权限状态的初始刷新
         updateSaveDirUI()
-        updateNotificationBadge()
+        updateNotificationRow()
     }
 
-    // ==================== 自动搜索开关 ====================
+    // ==================== ⓘ 功能说明 ====================
 
-    /** 刷新自动搜索开关的说明文案（不弹 Toast，供初始化与切换共用） */
-    private fun refreshAutoSearchUI(enabled: Boolean) {
+    /** 互斥展开：先收起全部，再展开当前项；点击已展开项 = 收起 */
+    private fun toggleExplain(infoId: Int, exId: Int) {
+        val target = findViewById<View>(exId)
+        val opening = target.visibility != View.VISIBLE
+        explainMap.values.forEach { id -> findViewById<View>(id).visibility = View.GONE }
+        explainMap.keys.forEach { id ->
+            findViewById<TextView>(id).apply {
+                setBackgroundResource(R.drawable.bg_info_circle)
+                setTextColor(getColor(R.color.info_circle_text))
+            }
+        }
+        if (opening) {
+            target.visibility = View.VISIBLE
+            findViewById<TextView>(infoId).apply {
+                setBackgroundResource(R.drawable.bg_info_circle_on)
+                setTextColor(0xFFFFFFFF.toInt())
+            }
+        }
+    }
+
+    // ==================== 连接总览 hero ====================
+
+    private fun isServiceConnected(): Boolean =
+        SyncForegroundService.instance?.connectionState == 1
+
+    private fun startStatusPolling() {
+        handler.post(object : Runnable {
+            override fun run() {
+                if (isDestroyedActivity) return
+                refreshHero()
+                handler.postDelayed(this, 1500)
+            }
+        })
+    }
+
+    /** hero 区随服务状态刷新（状态轮询与断开确认后共用） */
+    private fun refreshHero() {
+        val service = SyncForegroundService.instance
+        val connected = service?.connectionState == 1
+
+        if (connected && service != null) {
+            tvConnTag.text = "● 已连接"
+            tvConnTag.setTextColor(getColor(R.color.accent))
+            tvConnTag.setBackgroundResource(R.drawable.bg_tag_connected)
+            tvDeviceName.text = service.currentPcName.ifEmpty { "Windows 电脑" }
+            tvDeviceIp.text = "${service.currentPcIp} · 局域网"
+            codeRow.visibility = View.VISIBLE
+            tvPairingCode.text = formatPin(service.pinCode)
+            btnConnectHero.visibility = View.GONE
+        } else {
+            tvConnTag.text = "○ 未连接"
+            tvConnTag.setTextColor(getColor(R.color.text_2))
+            tvConnTag.setBackgroundResource(R.drawable.bg_tag_idle)
+            tvDeviceName.text = "未连接设备"
+            tvDeviceIp.text = when {
+                service == null -> "后台服务启动中…"
+                service.connectionState == -1 -> "正在配对连接电脑…"
+                else -> disconnectedHint(service)
+            }
+            codeRow.visibility = View.GONE
+            btnConnectHero.visibility = View.VISIBLE
+        }
+
+        // 统计行：今日已同步 N 条 ｜ 上次 N 前
+        val snap = SyncStats.snapshot(this)
+        tvStats.text = if (snap.lastAt > 0) {
+            "今日已同步 %,d 条 ｜ 上次 %s".format(
+                Locale.getDefault(), snap.todayCount, SyncStats.lastSyncDisplay(snap.lastAt)
+            )
+        } else {
+            "今日已同步 %,d 条".format(Locale.getDefault(), snap.todayCount)
+        }
+
+        // 未连接锁定：自动互传行置灰、开关禁用、副说明改口
+        rowAutoSync.alpha = if (connected) 1f else 0.45f
+        switchAutoSync.isEnabled = connected
+        tvAutoSyncDesc.text = if (connected) "复制内容后秒级静默同步至电脑" else "需先连接设备后启用"
+
+        updateShizukuRow()
+    }
+
+    private fun disconnectedHint(service: SyncForegroundService): String {
+        val devCount = service.getDiscoveredDeviceList().size
+        return when {
+            devCount > 0 -> "局域网内发现 $devCount 台可用设备"
+            !service.isAutoSearchEnabled() -> "自动搜索已关闭，可手动添加地址"
+            !service.isLanSearching() -> "搜索已暂停，进入「电脑配对」重新扫描"
+            else -> "正在搜索局域网内的电脑…"
+        }
+    }
+
+    /** 配对码展示：6 位按 3+3 分组，缺位时占位 */
+    private fun formatPin(pin: String): String = when {
+        pin.length == 6 -> "${pin.substring(0, 3)} ${pin.substring(3)}"
+        pin.isNotEmpty() -> pin
+        else -> "— — — —"
+    }
+
+    // ==================== 各行状态刷新 ====================
+
+    private fun refreshAutoSearchDesc(enabled: Boolean) {
         tvAutoSearchDesc.text = if (enabled) {
             "5 分钟后降频、15 分钟后停止，避免夜间空转耗电"
         } else {
-            "已关闭自动搜索，点击「重新扫描」手动查找电脑"
+            "已关闭自动搜索，到「电脑配对」手动查找电脑"
         }
     }
 
-    // ==================== 通知权限 ====================
+    private fun isNotificationEnabled(): Boolean =
+        NotificationManagerCompat.from(this).areNotificationsEnabled()
 
-    /** 是否已授予通知权限 */
-    private fun isNotificationEnabled(): Boolean {
-        return NotificationManagerCompat.from(this).areNotificationsEnabled()
+    private fun updateNotificationRow() {
+        tvNotificationValue.text = if (isNotificationEnabled()) "已开启" else "未开启"
     }
 
-    /** 刷新通知权限徽标与按钮文案 */
-    private fun updateNotificationBadge() {
-        val enabled = isNotificationEnabled()
-        tvNotificationBadge.text = if (enabled) "✅ 已开启" else "⚠️ 未开启"
-        tvNotificationBadge.setTextColor(Color.parseColor(if (enabled) "#10B981" else "#EF4444"))
-        btnNotificationPerm.text = if (enabled) "已开启" else "去开启"
-    }
-
-    /**
-     * 申请通知权限。
-     * Android 13+ 走运行时权限申请；更低版本不存在该运行时权限，直接跳系统通知设置页。
-     */
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             try {
@@ -632,7 +474,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 跳转到本应用的通知设置页 */
     private fun openAppNotificationSettings() {
         try {
             val intent = Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
@@ -644,29 +485,132 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== 保存目录 ====================
-
-    /** 刷新保存目录的展示路径与「恢复默认」入口可见性 */
     private fun updateSaveDirUI() {
+        if (!this::tvSaveDirPath.isInitialized) return
         tvSaveDirPath.text = SaveDirManager.getDisplayPath(this)
         tvResetSaveDir.visibility = if (SaveDirManager.hasCustomDir(this)) View.VISIBLE else View.GONE
     }
 
-    // ==================== 路径点击：用其他应用打开 ====================
+    // ==================== 本地缓存 ====================
 
-    /**
-     * 点击日志路径：用其他应用打开日志文件。
-     *
-     * 日志固定写在 App 私有外部目录（`Android/data/<包名>/files/`）。Android 11+ 分区存储下
-     * 任何文件管理器都无权浏览其他应用的 `Android/data`，打开「目录」的选择器里必然只有
-     * 网盘/浏览器类噪音（连系统「文件」都不出现），因此 DebugLogger 内部改为经 FileProvider
-     * 以 `text/plain` 直接打开日志**文件**，交给文本查看器/编辑器展示。
-     */
-    private fun openLogDirWithOtherApps() {
-        if (!DebugLogger.openLogDirectory(this)) {
-            Toast.makeText(this, "没有可打开日志文件的应用，可点「导出」分享日志文件", Toast.LENGTH_LONG).show()
+    /** cacheDir 体积（文件传输中转分块与分享中转都在 cacheDir 下） */
+    private fun refreshCacheSize() {
+        Thread {
+            val bytes = dirSize(cacheDir)
+            runOnUiThread {
+                if (!isDestroyedActivity) {
+                    tvCacheSize.text = if (bytes < 1024) "0 MB" else "${bytes / (1024 * 1024)} MB"
+                }
+            }
+        }.start()
+    }
+
+    private fun dirSize(dir: File?): Long {
+        if (dir == null || !dir.exists()) return 0L
+        return try {
+            dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+        } catch (_: Exception) {
+            0L
         }
     }
+
+    private fun confirmClearCache() {
+        val bytes = tvCacheSize.text.toString().removeSuffix(" MB").toLongOrNull() ?: 0L
+        if (bytes <= 0) {
+            Toast.makeText(this, "缓存已是清洁状态", Toast.LENGTH_SHORT).show()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("清除本地缓存？")
+            .setDescription(bytes)
+            .setPositiveButton("清除") { _, _ ->
+                Thread {
+                    clearCacheDir(cacheDir)
+                    runOnUiThread {
+                        refreshCacheSize()
+                        Toast.makeText(this, "已清除本地缓存", Toast.LENGTH_SHORT).show()
+                    }
+                }.start()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun AlertDialog.Builder.setDescription(bytes: Long): AlertDialog.Builder {
+        val mb = bytes / (1024.0 * 1024.0)
+        val shown = if (mb >= 1) String.format(Locale.getDefault(), "%.1f MB", mb) else "${bytes / 1024} KB"
+        setMessage("将删除 $shown 临时文件，不会删除已保存的接收文件。")
+        return this
+    }
+
+    private fun clearCacheDir(dir: File) {
+        try {
+            val children = dir.listFiles() ?: return
+            for (child in children) {
+                if (child.isDirectory) child.deleteRecursively() else child.delete()
+            }
+            DebugLogger.log("UI", "本地缓存已清除: ${dir.absolutePath}")
+        } catch (e: Exception) {
+            DebugLogger.warn("UI", "清除本地缓存失败: ${e.message}")
+        }
+    }
+
+    // ==================== Shizuku ====================
+
+    private fun updateShizukuRow() {
+        if (!this::tvShizukuValue.isInitialized) return
+        when (ShizukuClipboardManager.getState()) {
+            ShizukuClipboardManager.State.READY -> {
+                tvShizukuValue.text = "已激活"
+                tvShizukuValue.setTextColor(getColor(R.color.accent))
+            }
+            ShizukuClipboardManager.State.UNAUTHORIZED -> {
+                tvShizukuValue.text = "待授权"
+                tvShizukuValue.setTextColor(getColor(R.color.log_warn))
+            }
+            ShizukuClipboardManager.State.NOT_RUNNING -> {
+                tvShizukuValue.text = "未运行"
+                tvShizukuValue.setTextColor(getColor(R.color.text_3))
+            }
+        }
+    }
+
+    private fun onShizukuRowClicked() {
+        when (ShizukuClipboardManager.getState()) {
+            ShizukuClipboardManager.State.READY -> {
+                // 已激活：跑一次读写链路自检，结果以 toast 呈现
+                Toast.makeText(this, "正在自检 Shizuku 读写链路...", Toast.LENGTH_SHORT).show()
+                Thread {
+                    SyncForegroundService.instance?.setSelfTestWriteMode(true)
+                    val result = try {
+                        ShizukuClipboardManager.debugFullSelfTest()
+                    } finally {
+                        SyncForegroundService.instance?.setSelfTestWriteMode(false)
+                    }
+                    runOnUiThread {
+                        Toast.makeText(this, result.split("\n").firstOrNull() ?: result, Toast.LENGTH_LONG).show()
+                    }
+                }.start()
+            }
+            ShizukuClipboardManager.State.UNAUTHORIZED -> {
+                ShizukuClipboardManager.requestPermission()
+            }
+            ShizukuClipboardManager.State.NOT_RUNNING -> {
+                try {
+                    val launchIntent = packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
+                    if (launchIntent != null) {
+                        startActivity(launchIntent)
+                    } else {
+                        Toast.makeText(this, "未检测到 Shizuku 应用，请先安装并启动 Shizuku", Toast.LENGTH_LONG).show()
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(this, "未检测到 Shizuku，当前使用标准兼容模式", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    // ==================== 路径点击：用其他应用打开 ====================
 
     /**
      * 点击保存目录路径：用默认应用直接打开；长按（[forceChooser]=true）重新弹选择列表，
@@ -674,9 +618,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun openSaveDirWithOtherApps(forceChooser: Boolean) {
         val handled = SaveDirManager.openDir(this, forceChooser,
-            onOpened = {
-                // 已用默认应用直接打开，无需额外处理
-            },
+            onOpened = { },
             onNeedChoose = { openers ->
                 SaveDirManager.showOpenerPickerDialog(
                     this,
@@ -697,192 +639,62 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun showDeviceSelectionDialog() {
-        val service = SyncForegroundService.instance
-        if (service == null) {
-            Toast.makeText(this, "后台服务未就绪，请稍候...", Toast.LENGTH_SHORT).show()
-            return
-        }
-        val devices = service.getDiscoveredDeviceList()
-        if (devices.isEmpty()) {
-            AlertDialog.Builder(this)
-                .setTitle("未发现在线电脑")
-                .setMessage("当前局域网未探测到任何在线电脑。\n\n请确认：\n1. 手机与电脑已连入同一局域网/Wi-Fi\n2. 电脑端 CrossClip.exe 是否已在运行\n3. 若电脑刚重启或切换了网络，可点击重新扫描")
-                .setPositiveButton("重新扫描") { _, _ ->
-                    service.triggerRescan()
-                    Toast.makeText(this, "正在重新搜索局域网电脑...", Toast.LENGTH_SHORT).show()
-                }
-                .setNegativeButton("取消", null)
-                .setNeutralButton("清除历史配置") { _, _ ->
-                    service.clearSavedHistory()
-                    etPinCode.setText("")
-                    etManualIp.setText("")
-                    Toast.makeText(this, "已清除历史电脑与配对记录", Toast.LENGTH_SHORT).show()
-                }
-                .show()
-            return
-        }
+    // ==================== 指引 / 关于 ====================
 
-        val items = devices.map { dev ->
-            val isCurrent = (service.connectionState == 1 && dev.ip == service.currentPcIp)
-            val tag = if (isCurrent) " [当前连接]" else ""
-            "${dev.name} (${dev.ip})$tag"
-        }.toTypedArray()
-
-        var selectedIndex = devices.indexOfFirst { service.connectionState == 1 && it.ip == service.currentPcIp }
-        if (selectedIndex < 0) {
-            selectedIndex = devices.indexOfFirst { it.deviceId == service.currentTargetDeviceId || it.ip == service.currentPcIp }
-        }
-        if (selectedIndex < 0) selectedIndex = 0
+    private fun showLockTaskGuideDialog() {
+        val guideMessage = StringBuilder()
+            .append("在系统多任务切换界面（近期任务）为 CrossClip 应用卡片加锁，可彻底防止系统清理后台或一键清理全部任务时误杀同步进程：\n\n")
+            .append("1. 小米、澎湃 OS (HyperOS / MIUI)：\n")
+            .append("   从屏幕底部上滑悬停进入多任务，长按 CrossClip 卡片，点击弹出菜单中的锁头图标；部分版本亦可直接向下拉动卡片加锁。\n\n")
+            .append("2. OPPO、一加、真我 (ColorOS / RealmeUI)：\n")
+            .append("   进入多任务后台，点击 CrossClip 卡片右上角设置菜单（三点图标），点击【锁定】。\n\n")
+            .append("3. vivo、iQOO (OriginOS)：\n")
+            .append("   进入多任务后台，向下拉动 CrossClip 卡片，卡片出现小锁图标即锁定成功。\n\n")
+            .append("4. 华为、荣耀 (HarmonyOS / MagicOS)：\n")
+            .append("   进入多任务后台，向下拉动 CrossClip 卡片，卡片出现锁头标记即锁定完成。\n\n")
+            .append("提示：若开启了【最近任务隐藏】，多任务栏将不会展示本应用卡片。建议保持多任务可见并给卡片加锁，兼顾后台驻留与防误杀。")
+            .toString()
 
         AlertDialog.Builder(this)
-            .setTitle("选择连接的电脑 (${devices.size} 台在线)")
-            .setSingleChoiceItems(items, selectedIndex) { dialog, which ->
-                val chosen = devices[which]
-                service.selectTargetDevice(chosen)
-                val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
-                val devPin = sp.getString("pin_code_${chosen.deviceId}", "") ?: ""
-                etPinCode.setText(devPin)
-                etPinCode.isEnabled = true
-                updateClearPinState()
-                btnConnectPc.text = "一键连接"
-                Toast.makeText(this, "已切换目标电脑: ${chosen.name} (${chosen.ip})", Toast.LENGTH_SHORT).show()
-                dialog.dismiss()
-            }
-            .setNegativeButton("取消", null)
-            .setNeutralButton("重新扫描") { _, _ ->
-                service.triggerRescan()
-                Toast.makeText(this, "正在重新搜索局域网电脑...", Toast.LENGTH_SHORT).show()
-            }
+            .setTitle("多任务卡片加锁操作指引")
+            .setMessage(guideMessage)
+            .setPositiveButton("知道了", null)
             .show()
     }
 
-    private fun startStatusPolling() {
-        handler.post(object : Runnable {
-            override fun run() {
-                if (isDestroyedActivity) return
-                refreshStatusFromService()
-                handler.postDelayed(this, 1500)
-            }
-        })
+    private fun showAboutSheet() {
+        val dialog = BottomSheetDialog(this)
+        dialog.setContentView(R.layout.dialog_about)
+        dialog.findViewById<TextView>(R.id.about_version)?.apply {
+            text = "版本 v${BuildConfig.VERSION_NAME} (build ${BuildConfig.VERSION_CODE})"
+            setOnClickListener { Toast.makeText(context, "已是最新版本 v${BuildConfig.VERSION_NAME}", Toast.LENGTH_SHORT).show() }
+        }
+        dialog.findViewById<TextView>(R.id.about_license)?.setOnClickListener {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("CrossClip License", "MIT License"))
+            Toast.makeText(this, "MIT 许可信息已复制", Toast.LENGTH_SHORT).show()
+        }
+        dialog.findViewById<TextView>(R.id.about_privacy)?.setOnClickListener {
+            Toast.makeText(this, "纯局域网点对点同步，数据不出局域网；日志仅保存在本机", Toast.LENGTH_LONG).show()
+        }
+        dialog.show()
     }
 
-    /** 依据后台服务的实时状态刷新主页文案（状态轮询与自动搜索开关切换共用） */
-    private fun refreshStatusFromService() {
-        val service = SyncForegroundService.instance
-        if (service != null) {
-            val pcName = if (service.currentPcName.isNotEmpty() && service.currentPcName != "未连接") {
-                service.currentPcName
-            } else {
-                "Windows 电脑"
-            }
+    // ==================== 服务与生命周期 ====================
 
-            val deviceList = service.getDiscoveredDeviceList()
-            val devCount = deviceList.size
-
-            // 自动搜索开关 / 扫描线程状态：用于区分「搜索中 / 已关闭 / 已暂停」，避免文案误导
-            val autoSearchOn = service.isAutoSearchEnabled()
-            val lanSearching = service.isLanSearching()
-
-            // 优先从实时探测列表中提取当前目标电脑，杜绝展示未连通的旧死 IP
-            val liveTarget = deviceList.firstOrNull { it.deviceId == service.currentTargetDeviceId }
-                ?: deviceList.firstOrNull { service.currentPcIp.isNotEmpty() && it.ip == service.currentPcIp }
-            val activeIp = if (service.connectionState == 1) {
-                service.currentPcIp
-            } else {
-                liveTarget?.ip ?: ""
-            }
-            val activeName = if (service.connectionState == 1) {
-                pcName
-            } else {
-                liveTarget?.name ?: pcName
-            }
-
-            if (activeIp.isNotEmpty() && (service.connectionState == 1 || liveTarget != null)) {
-                if (devCount > 1) {
-                    tvDiscoveredDevice.text = "🟢 局域网已发现 ($devCount 台): $activeName ($activeIp)"
-                    btnSwitchDevice.visibility = View.VISIBLE
-                    btnSwitchDevice.text = "切换 ($devCount)"
-                } else {
-                    tvDiscoveredDevice.text = "🟢 局域网已发现: $activeName ($activeIp)"
-                    btnSwitchDevice.visibility = View.VISIBLE
-                    btnSwitchDevice.text = "选择"
-                }
-                tvDiscoveredDevice.setTextColor(Color.parseColor("#10B981"))
-            } else {
-                if (devCount > 0) {
-                    tvDiscoveredDevice.text = "🟢 局域网发现其他电脑 ($devCount 台)"
-                    tvDiscoveredDevice.setTextColor(Color.parseColor("#10B981"))
-                    btnSwitchDevice.visibility = View.VISIBLE
-                    btnSwitchDevice.text = "选择 ($devCount)"
-                } else {
-                    tvDiscoveredDevice.text = when {
-                        !autoSearchOn -> "🔍 自动搜索已关闭，点「重新扫描」查找电脑"
-                        !lanSearching -> "🔍 搜索已暂停，点「重新扫描」继续查找"
-                        else -> "🔍 正在局域网全网段搜索电脑..."
-                    }
-                    tvDiscoveredDevice.setTextColor(Color.parseColor("#64748B"))
-                    btnSwitchDevice.visibility = View.GONE
-                }
-            }
-
-            when (service.connectionState) {
-                1 -> {
-                    tvStatus.text = "● 已连接至 $pcName (${service.currentPcIp})"
-                    tvStatus.setTextColor(Color.parseColor("#10B981"))
-                    btnConnectPc.text = "断开连接"
-                    btnConnectPc.isEnabled = true
-                    etPinCode.isEnabled = false
-                    updateClearPinState()
-                }
-                2 -> {
-                    tvStatus.text = "● PIN 码不匹配 (电脑已换码，请输入新码重连)"
-                    tvStatus.setTextColor(Color.parseColor("#EF4444"))
-                    btnConnectPc.text = "一键连接"
-                    btnConnectPc.isEnabled = true
-                    etPinCode.isEnabled = true
-                    updateClearPinState()
-                }
-                -1 -> {
-                    tvStatus.text = "● 正在验证密文挑战握手..."
-                    tvStatus.setTextColor(Color.parseColor("#F59E0B"))
-                    btnConnectPc.text = "配对中..."
-                    btnConnectPc.isEnabled = false
-                }
-                else -> {
-                    btnConnectPc.text = "一键连接"
-                    btnConnectPc.isEnabled = true
-                    etPinCode.isEnabled = true
-                    updateClearPinState()
-                    when {
-                        liveTarget != null -> {
-                            tvStatus.text = "● 已发现目标电脑，请输入 6 位 PIN 码连接"
-                            tvStatus.setTextColor(Color.parseColor("#0284C7"))
-                        }
-                        !autoSearchOn -> {
-                            tvStatus.text = "● 电脑离线，自动搜索已关闭（可点「重新扫描」查找）"
-                            tvStatus.setTextColor(Color.parseColor("#64748B"))
-                        }
-                        !lanSearching -> {
-                            tvStatus.text = "● 电脑离线，搜索已暂停（可点「重新扫描」继续）"
-                            tvStatus.setTextColor(Color.parseColor("#64748B"))
-                        }
-                        else -> {
-                            tvStatus.text = "● 电脑离线中，局域网搜索中..."
-                            tvStatus.setTextColor(Color.parseColor("#64748B"))
-                        }
-                    }
-                }
-            }
+    private fun startSyncService() {
+        val intent = Intent(this, SyncForegroundService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
         }
-        btnBatteryPerm.text = "去设置"
-        updateShizukuUI()
     }
 
     private fun promptMiuiKeepAliveIfNeeded() {
         val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         if (sp.getBoolean("miui_keepalive_prompted", false)) return
-        val manufacturer = Build.MANUFACTURER.lowercase()
+        val manufacturer = Build.MANUFACTURER.lowercase(Locale.getDefault())
         if (!manufacturer.contains("xiaomi") && !manufacturer.contains("redmi")) return
 
         sp.edit().putBoolean("miui_keepalive_prompted", true).apply()
@@ -904,51 +716,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun updateShizukuUI() {
-        when (ShizukuClipboardManager.getState()) {
-            ShizukuClipboardManager.State.READY -> {
-                tvShizukuBadge.text = "🟢 特权已激活"
-                tvShizukuBadge.setTextColor(Color.parseColor("#10B981"))
-                tvShizukuDesc.text = "已连接系统底层的剪贴板服务，享受零弹窗、零焦点切换的 100% 后台静默互传。"
-                btnShizukuAuth.text = "重新自检"
-                btnShizukuAuth.isEnabled = true
-            }
-            ShizukuClipboardManager.State.UNAUTHORIZED -> {
-                tvShizukuBadge.text = "🟡 待授权"
-                tvShizukuBadge.setTextColor(Color.parseColor("#F59E0B"))
-                tvShizukuDesc.text = "检测到 Shizuku 服务正在运行，点击下方按钮授权以开启完全静默互传。"
-                btnShizukuAuth.text = "去授权"
-                btnShizukuAuth.isEnabled = true
-            }
-            ShizukuClipboardManager.State.NOT_RUNNING -> {
-                tvShizukuBadge.text = "⚪ 服务未运行"
-                tvShizukuBadge.setTextColor(Color.parseColor("#64748B"))
-                tvShizukuDesc.text = "Shizuku 未运行或未安装，当前已自动启用前台服务与兼容模式保障正常互传。"
-                btnShizukuAuth.text = "打开 Shizuku"
-                btnShizukuAuth.isEnabled = true
-            }
-        }
-    }
-
-    private fun startSyncService() {
-        val intent = Intent(this, SyncForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
-    }
-
-    private fun runShizukuSelfTest() {
-        tvShizukuDebug.text = "正在自检 Shizuku 读取链路..."
-        Thread {
-            val result = ShizukuClipboardManager.debugReadClipboard()
-            runOnUiThread {
-                tvShizukuDebug.text = "自检: $result"
-            }
-        }.start()
-    }
-
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         DebugLogger.log("UI", "用户触发返回键，将 Activity 移至后台 (moveTaskToBack)")
@@ -961,6 +728,7 @@ class MainActivity : AppCompatActivity() {
             Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         } catch (_: Throwable) {}
         isDestroyedActivity = true
+        handler.removeCallbacksAndMessages(null)
         DebugLogger.log("APP_LIFECYCLE", "MainActivity.onDestroy")
     }
 }

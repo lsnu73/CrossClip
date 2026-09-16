@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 滑块 22×22 白圆，四周 2dp 透明内边距（drawable 尺寸 26×26）：
+     使滑块始终嵌在 44×26 轨道内部，四周均匀留边，不会出现外凸 thumb -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:insetLeft="2dp"
+    android:insetTop="2dp"
+    android:insetRight="2dp"
+    android:insetBottom="2dp">
+    <shape android:shape="oval">
+        <solid android:color="#FFFFFF" />
+        <size android:width="22dp" android:height="22dp" />
+    </shape>
+</inset>

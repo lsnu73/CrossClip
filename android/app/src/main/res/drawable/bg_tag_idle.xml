@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 「○ 未连接」标签底：灰底 rgba(16,18,22,.05)，圆角 6 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <corners android:radius="6dp" />
+    <solid android:color="#0D101216" />
+</shape>

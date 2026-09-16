@@ -48,6 +48,22 @@
             </intent-filter>
         </activity>
 
+        <!-- 屏 2 · 电脑配对：设备发现列表 + 手动添加 IP -->
+        <activity
+            android:name=".ui.PairingActivity"
+            android:exported="false" />
+
+        <!-- 屏 3 · 输入 PIN 码：6 格配对码 -->
+        <activity
+            android:name=".ui.PairCodeActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize|stateHidden" />
+
+        <!-- 屏 4 · 诊断与排查工具 -->
+        <activity
+            android:name=".ui.DiagnosticsActivity"
+            android:exported="false" />
+
         <!-- 后台透明剪贴板写入器 (解决 Android 10+ 剪贴板受限降级兼容) -->
         <activity
             android:name=".ui.ClipWriteActivity"

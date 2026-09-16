@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 规范：开关轨道 44×26，圆角 13，全出血；开=accent 关=#E3E4E8。
+     滑块在 switch_thumb 中以 2dp 透明边距内嵌，行程 18dp，绝不外凸 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_checked="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="13dp" />
+            <solid android:color="@color/accent" />
+            <size android:width="44dp" android:height="26dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="13dp" />
+            <solid android:color="@color/switch_off" />
+            <size android:width="44dp" android:height="26dp" />
+        </shape>
+    </item>
+</selector>

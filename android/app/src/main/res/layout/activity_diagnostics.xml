@@ -1,0 +1,309 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 屏 4 · 诊断与排查工具：筛选 chip + 深色分级日志块 + 统计条 + 导出 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/surface">
+
+    <!-- 导航栏 -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="46dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="20dp">
+
+        <ImageView
+            android:id="@+id/btn_back"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="start|center_vertical"
+            android:padding="8dp"
+            android:src="@drawable/ic_chevron_left"
+            android:contentDescription="返回"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="诊断与排查工具"
+            android:textSize="16.5sp"
+            android:textColor="@color/text_primary"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/btn_refresh"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end|center_vertical"
+            android:padding="8dp"
+            android:text="刷新"
+            android:textSize="14sp"
+            android:textColor="@color/text_2"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_gravity="bottom"
+            android:layout_marginStart="-12dp"
+            android:layout_marginEnd="-20dp"
+            android:background="@color/line_color" />
+    </FrameLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true"
+        android:overScrollMode="never"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="26dp">
+
+            <!-- 筛选 chip：全部 | 同步 | 网络 | 警告 | 错误 N -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="20dp"
+                android:paddingTop="14dp"
+                android:paddingEnd="20dp"
+                android:paddingBottom="10dp">
+
+                <TextView
+                    android:id="@+id/chip_all"
+                    style="@style/FilterChip"
+                    android:text="全部" />
+
+                <TextView
+                    android:id="@+id/chip_sync"
+                    style="@style/FilterChip"
+                    android:layout_marginStart="8dp"
+                    android:text="同步" />
+
+                <TextView
+                    android:id="@+id/chip_net"
+                    style="@style/FilterChip"
+                    android:layout_marginStart="8dp"
+                    android:text="网络" />
+
+                <TextView
+                    android:id="@+id/chip_warn"
+                    style="@style/FilterChip"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_chip_warn"
+                    android:textColor="@color/log_warn"
+                    android:text="警告" />
+
+                <TextView
+                    android:id="@+id/chip_err"
+                    style="@style/FilterChip"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_chip_err"
+                    android:textColor="@color/danger"
+                    android:text="错误 0" />
+            </LinearLayout>
+
+            <!-- 深色日志块：四级语义色等宽渲染 -->
+            <ScrollView
+                android:id="@+id/log_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="352dp"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="2dp"
+                android:layout_marginEnd="20dp"
+                android:background="@drawable/bg_log_box"
+                android:overScrollMode="never"
+                android:scrollbars="none">
+
+                <TextView
+                    android:id="@+id/tv_logs"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:paddingStart="12dp"
+                    android:paddingTop="13dp"
+                    android:paddingEnd="12dp"
+                    android:paddingBottom="13dp"
+                    android:textSize="11sp"
+                    android:lineSpacingExtra="2dp"
+                    android:textColor="@color/log_text"
+                    android:text="正在加载日志…" />
+            </ScrollView>
+
+            <!-- 统计条：错误 N | 警告 N | 总行数 N -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="16dp"
+                android:layout_marginEnd="20dp"
+                android:background="@drawable/bg_summary_bar"
+                android:orientation="horizontal">
+
+                <LinearLayout style="@style/SummaryCell">
+                    <TextView
+                        android:id="@+id/tv_err_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="0"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="@color/danger" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="错误"
+                        android:textSize="11sp"
+                        android:textColor="@color/text_3" />
+                </LinearLayout>
+
+                <LinearLayout style="@style/SummaryCell">
+                    <TextView
+                        android:id="@+id/tv_warn_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="0"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="@color/log_warn" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="警告"
+                        android:textSize="11sp"
+                        android:textColor="@color/text_3" />
+                </LinearLayout>
+
+                <LinearLayout style="@style/SummaryCell">
+                    <TextView
+                        android:id="@+id/tv_total_count"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="0"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="@color/text_primary" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="总行数"
+                        android:textSize="11sp"
+                        android:textColor="@color/text_3" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- 日志路径 -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingStart="20dp"
+                android:paddingTop="26dp"
+                android:paddingBottom="8dp"
+                android:text="日志路径"
+                android:textSize="11.5sp"
+                android:textColor="@color/text_3"
+                android:textStyle="bold"
+                android:letterSpacing="0.1" />
+
+            <TextView
+                android:id="@+id/tv_log_path"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingStart="20dp"
+                android:paddingEnd="20dp"
+                android:fontFamily="monospace"
+                android:text="…"
+                android:textSize="12.5sp"
+                android:maxLines="1"
+                android:ellipsize="middle"
+                android:textColor="@color/link_blue"
+                android:background="?attr/selectableItemBackground"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp" />
+
+            <!-- 复制 / 导出 .txt / 分享 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingStart="20dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="20dp">
+
+                <androidx.appcompat.widget.AppCompatButton
+                    android:id="@+id/btn_copy_logs"
+                    style="@style/GhostButton"
+                    android:text="复制" />
+
+                <androidx.appcompat.widget.AppCompatButton
+                    android:id="@+id/btn_export_logs"
+                    style="@style/GhostButton"
+                    android:layout_marginStart="10dp"
+                    android:text="导出 .txt" />
+
+                <androidx.appcompat.widget.AppCompatButton
+                    android:id="@+id/btn_share_logs"
+                    style="@style/GhostButton"
+                    android:layout_marginStart="10dp"
+                    android:text="分享" />
+            </LinearLayout>
+
+            <!-- 危险行：清空日志 + 体积 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="20dp"
+                android:paddingTop="8dp"
+                android:paddingEnd="20dp"
+                android:paddingBottom="4dp">
+
+                <TextView
+                    android:id="@+id/btn_clear_logs"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp"
+                    android:text="清空日志"
+                    android:textSize="14sp"
+                    android:textColor="@color/danger"
+                    android:background="?attr/selectableItemBackground" />
+
+                <TextView
+                    android:id="@+id/tv_log_size"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:text="0.0 MB"
+                    android:textSize="12sp"
+                    android:textColor="@color/text_3" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:paddingTop="18dp"
+                android:paddingBottom="8dp"
+                android:fontFamily="monospace"
+                android:text="日志仅保存在本机，用于排查连接与同步问题"
+                android:textSize="11sp"
+                android:textColor="@color/footer_text"
+                android:letterSpacing="0.03" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

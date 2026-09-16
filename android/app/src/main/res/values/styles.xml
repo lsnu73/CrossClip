@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- CrossClip 重设计通用行样式（规范 §1.2/§1.3） -->
+<resources>
+
+    <!-- ⓘ 功能说明圆标：13px 圆形描边，与标题同行不占行高 -->
+    <style name="InfoCircle">
+        <item name="android:background">@drawable/bg_info_circle</item>
+        <item name="android:gravity">center</item>
+        <item name="android:layout_marginStart">6dp</item>
+        <item name="android:text">i</item>
+        <item name="android:textSize">9sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textColor">@color/info_circle_text</item>
+        <item name="android:layout_gravity">center_vertical</item>
+    </style>
+
+    <!-- ⓘ 展开的说明条：灰底 #F7F7F8 + 1px 细边 + 圆角 10，12.5/1.7 行距 -->
+    <style name="ExplainBlock">
+        <item name="android:background">@drawable/bg_inline_block</item>
+        <item name="android:layout_marginStart">20dp</item>
+        <item name="android:layout_marginTop">2dp</item>
+        <item name="android:layout_marginEnd">20dp</item>
+        <item name="android:layout_marginBottom">12dp</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingTop">10dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:paddingBottom">10dp</item>
+        <item name="android:textSize">12.5sp</item>
+        <item name="android:lineSpacingExtra">3dp</item>
+        <item name="android:textColor">@color/text_2</item>
+        <item name="android:visibility">gone</item>
+    </style>
+
+    <!-- 行分隔线：1px，左侧缩进 20 -->
+    <style name="RowDivider">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">1dp</item>
+        <item name="android:layout_marginStart">20dp</item>
+        <item name="android:background">@color/line_color</item>
+    </style>
+
+    <!-- 行右侧 chevron -->
+    <style name="RowChevron">
+        <item name="android:layout_marginStart">10dp</item>
+    </style>
+
+    <!-- 「去设置 ›」右侧文案 -->
+    <style name="GoText">
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">@color/text_2</item>
+    </style>
+
+    <!-- 三联数据条的一个分格 -->
+    <style name="SummaryCell">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:gravity">center</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:paddingTop">11dp</item>
+        <item name="android:paddingBottom">11dp</item>
+    </style>
+
+    <!-- 日志筛选 chip -->
+    <style name="FilterChip">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingStart">12dp</item>
+        <item name="android:paddingTop">5dp</item>
+        <item name="android:paddingEnd">12dp</item>
+        <item name="android:paddingBottom">5dp</item>
+        <item name="android:textSize">12.5sp</item>
+        <item name="android:textColor">@color/text_2</item>
+        <item name="android:background">@drawable/bg_chip</item>
+    </style>
+
+    <!-- 等宽描边按钮行中的按钮 -->
+    <style name="GhostButton">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">36dp</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:background">@drawable/bg_btn_ghost</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <!-- 配对码格：48×56，圆角 10，左右各 4dp（视觉间距 8） -->
+    <style name="PinBox">
+        <item name="android:layout_width">48dp</item>
+        <item name="android:layout_height">56dp</item>
+        <item name="android:layout_marginStart">4dp</item>
+        <item name="android:layout_marginEnd">4dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:background">@drawable/bg_pin_box</item>
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:textSize">22sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/text_3</item>
+    </style>
+</resources>

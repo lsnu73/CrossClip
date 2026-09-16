@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 描边按钮（次级操作）：按用户要求与主按钮统一为石墨黑实心 + 白字，
+     圆角 10，按压转深灰，禁用转 #C8CAD0。与 bg_btn_dark 视觉一致，
+     仅语义上区分主次操作。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_enabled="false">
+        <shape android:shape="rectangle">
+            <corners android:radius="10dp" />
+            <solid android:color="@color/btn_disabled" />
+        </shape>
+    </item>
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="10dp" />
+            <solid android:color="#2B2E36" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="10dp" />
+            <solid android:color="@color/text_primary" />
+        </shape>
+    </item>
+</selector>

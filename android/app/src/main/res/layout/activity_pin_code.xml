@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 屏 3 · 输入 PIN 码：6 格配对码 + 错误抖动清空 + 三联数据条 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/surface">
+
+    <!-- 导航栏 -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="46dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="20dp">
+
+        <ImageView
+            android:id="@+id/btn_back"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="start|center_vertical"
+            android:padding="8dp"
+            android:src="@drawable/ic_chevron_left"
+            android:contentDescription="返回"
+            android:background="?attr/selectableItemBackgroundBorderless" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="输入 PIN 码"
+            android:textSize="16.5sp"
+            android:textColor="@color/text_primary"
+            android:textStyle="bold" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_gravity="bottom"
+            android:layout_marginStart="-12dp"
+            android:layout_marginEnd="-20dp"
+            android:background="@color/line_color" />
+    </FrameLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true"
+        android:overScrollMode="never"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="26dp">
+
+            <!-- 居中 hero -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:gravity="center_horizontal"
+                android:paddingStart="24dp"
+                android:paddingTop="30dp"
+                android:paddingEnd="24dp">
+
+                <ImageView
+                    android:layout_width="46dp"
+                    android:layout_height="46dp"
+                    android:src="@drawable/ic_monitor_large"
+                    android:contentDescription="电脑" />
+
+                <TextView
+                    android:id="@+id/tv_pin_title"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="18dp"
+                    android:text="桌面端正在请求配对"
+                    android:textSize="20sp"
+                    android:textColor="@color/text_primary"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tv_pin_desc"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="center"
+                    android:text="在电脑托盘显示的 6 位 PIN 码输入到下方，即可建立加密连接。"
+                    android:textSize="13.5sp"
+                    android:lineSpacingExtra="2dp"
+                    android:textColor="@color/text_2" />
+            </LinearLayout>
+
+            <!-- 6 格配对码（点击任意格拉起数字键盘） -->
+            <LinearLayout
+                android:id="@+id/pin_boxes"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_horizontal"
+                android:paddingStart="12dp"
+                android:paddingTop="26dp"
+                android:paddingEnd="12dp">
+
+                <TextView android:id="@+id/box_0" style="@style/PinBox" />
+                <TextView android:id="@+id/box_1" style="@style/PinBox" />
+                <TextView android:id="@+id/box_2" style="@style/PinBox" />
+                <TextView android:id="@+id/box_3" style="@style/PinBox" />
+                <TextView android:id="@+id/box_4" style="@style/PinBox" />
+                <TextView android:id="@+id/box_5" style="@style/PinBox" />
+            </LinearLayout>
+
+            <!-- 隐藏的数字输入框：驱动 6 格渲染，本身不可见 -->
+            <EditText
+                android:id="@+id/et_hidden_pin"
+                android:layout_width="1px"
+                android:layout_height="1px"
+                android:alpha="0"
+                android:background="@null"
+                android:cursorVisible="false"
+                android:inputType="number"
+                android:maxLength="6"
+                android:textSize="1sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                android:gravity="center"
+                android:text="电脑端 PIN 码为 6 位，输入错误将自动清空"
+                android:textSize="12.5sp"
+                android:textColor="@color/text_3" />
+
+            <androidx.appcompat.widget.AppCompatButton
+                android:id="@+id/btn_confirm_pair"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="22dp"
+                android:layout_marginEnd="20dp"
+                android:background="@drawable/bg_btn_dark"
+                android:enabled="false"
+                android:text="确认配对"
+                android:textAllCaps="false"
+                android:textSize="15sp"
+                android:textColor="#FFFFFF"
+                android:stateListAnimator="@null"
+                android:insetTop="0dp"
+                android:insetBottom="0dp" />
+
+            <TextView
+                android:id="@+id/btn_rescan"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:gravity="center"
+                android:padding="6dp"
+                android:text="未看到 PIN 码？返回重新扫描设备"
+                android:textSize="13sp"
+                android:textColor="@color/text_2"
+                android:background="?attr/selectableItemBackground" />
+
+            <!-- 三联数据条 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="20dp"
+                android:layout_marginTop="26dp"
+                android:layout_marginEnd="20dp"
+                android:background="@drawable/bg_summary_bar"
+                android:orientation="horizontal">
+
+                <LinearLayout style="@style/SummaryCell">
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="E2EE"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="@color/text_primary" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="端到端加密"
+                        android:textSize="11sp"
+                        android:textColor="@color/text_3" />
+                </LinearLayout>
+
+                <LinearLayout style="@style/SummaryCell">
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="LAN"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="@color/text_primary" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="仅局域网"
+                        android:textSize="11sp"
+                        android:textColor="@color/text_3" />
+                </LinearLayout>
+
+                <LinearLayout style="@style/SummaryCell">
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
+                        android:text="AES-256"
+                        android:textSize="15sp"
+                        android:textStyle="bold"
+                        android:textColor="@color/text_primary" />
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="3dp"
+                        android:text="认证加密"
+                        android:textSize="11sp"
+                        android:textColor="@color/text_3" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:paddingTop="18dp"
+                android:paddingBottom="8dp"
+                android:fontFamily="monospace"
+                android:text="连接建立后可在「设置 › 同步」中调整自动互传"
+                android:textSize="11sp"
+                android:textColor="@color/footer_text"
+                android:letterSpacing="0.03" />
+        </LinearLayout>
+    </ScrollView>
+</LinearLayout>

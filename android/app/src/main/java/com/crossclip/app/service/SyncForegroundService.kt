@@ -36,6 +36,8 @@ import com.crossclip.app.shizuku.ShizukuPrivilegeHelper
 import com.crossclip.app.ui.ClipWriteActivity
 import com.crossclip.app.ui.MainActivity
 import com.crossclip.app.util.DebugLogger
+import com.crossclip.app.util.LogLevel
+import com.crossclip.app.util.SyncStats
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -390,13 +392,15 @@ class SyncForegroundService : Service() {
                 fileTransferSettled = true
                 val result = FileReceiver.completeReceive(applicationContext, fileId, fileHash)
                 if (result != null) {
-                    DebugLogger.log("FILE_RECEIVE", "文件接收完成: $result")
+                    DebugLogger.ok("FILE_RECEIVE", "文件接收完成: $result")
+                    // 文件传输成功也是一次完成的同步，计入统计行
+                    SyncStats.record(applicationContext)
                     DebugLogger.log("DIAG_COMPLETE", "→ 即将调用 showFileReceiveCompleteNotification")
                     showFileReceiveCompleteNotification(result)
                     DebugLogger.log("DIAG_COMPLETE", "→ showFileReceiveCompleteNotification 已返回")
                     updateNotification("✅ 文件接收完成")
                 } else {
-                    DebugLogger.log("FILE_RECEIVE", "文件接收失败: 哈希不匹配或数据不完整")
+                    DebugLogger.err("FILE_RECEIVE", "文件接收失败: 哈希不匹配或数据不完整")
                     showFileReceiveFailedNotification()
                     updateNotification("❌ 文件接收失败")
                 }
@@ -442,7 +446,7 @@ class SyncForegroundService : Service() {
                     discoveredDevices[devId] = DiscoveredDevice(devId, currentPcName, currentPcIp, currentHttpPort, ts)
                 }
             } else if (!ok && connectionState == 1) {
-                DebugLogger.log("HEARTBEAT", "心跳上报失败，电脑端已离线，重启 5/15 分钟搜索计时")
+                DebugLogger.warn("HEARTBEAT", "心跳上报失败，电脑端已离线，重启 5/15 分钟搜索计时")
                 connectionState = 0
                 lanDiscovery.isConnected = false
                 currentPcIp = ""
@@ -630,7 +634,8 @@ class SyncForegroundService : Service() {
                     "FILE_RECEIVED" -> {
                         val fileId = data.optString("file_id", "")
                         val path = data.optString("path", "")
-                        DebugLogger.log("SVC_NET", "文件已保存到电脑: $path")
+                        DebugLogger.ok("SVC_NET", "文件已保存到电脑: $path")
+                        SyncStats.record(applicationContext)
                         mainHandler.post {
                             updateNotification("✅ 文件已发送到电脑")
                         }
@@ -867,8 +872,9 @@ class SyncForegroundService : Service() {
                             currentPcIp = ip
                             currentHttpPort = httpPort
                             currentPcName = devName ?: name
+                            DebugLogger.ok("DISCOVERY", "已连接电脑 IP 动态漂移热重连成功: $ip")
                             val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
-                            sp.edit().putString("last_pc_ip", ip).apply()
+                            sp.edit().putString("last_pc_ip", ip).putString("last_pc_name", currentPcName).apply()
                             val sseUrl = "http://$ip:$httpPort/events?pin=$pinCode"
                             sseClient.connect(sseUrl)
                             // 通知栏文案统一走状态来源
@@ -907,6 +913,7 @@ class SyncForegroundService : Service() {
                         // 握手真正通过！原子转正为已连接，更新通信变量
                         connectionState = 1
                         lanDiscovery.isConnected = true
+                        DebugLogger.ok("DISCOVERY", "自动握手成功，已连接 $name ($ip)")
                         val boundId = retDevId ?: finalDevId
                         currentTargetDeviceId = boundId
                         currentPcIp = ip
@@ -917,6 +924,7 @@ class SyncForegroundService : Service() {
                         val editor = sp.edit()
                             .putString("last_device_id", boundId)
                             .putString("last_pc_ip", ip)
+                            .putString("last_pc_name", currentPcName)
                             .putInt("last_http_port", httpPort)
                             .putString("pin_code_$boundId", candidatePin)
                         editor.apply()
@@ -927,6 +935,7 @@ class SyncForegroundService : Service() {
                         sseClient.connect(sseUrl)
                     } else if (statusCode == 403) {
                         connectionState = 2
+                        DebugLogger.err("DISCOVERY", "自动握手失败: PIN 码不匹配 ($name, $ip)")
                         updateNotification("PIN 码不匹配，请核对电脑 PIN 码")
                     } else {
                         connectionState = 0
@@ -970,7 +979,7 @@ class SyncForegroundService : Service() {
     }
 
     fun disconnectCurrentPc() {
-        DebugLogger.log("SVC_ACTION", "手动断开与电脑连接：停止设备搜索，等待用户手动「重新扫描」")
+        DebugLogger.warn("SVC_ACTION", "手动断开与电脑连接：停止设备搜索，等待用户手动「重新扫描」")
         // 1. 先落「已断开」状态，再关连接。
         //    顺序不能反：sseClient.disconnect() 会同步回调 onConnectionChanged(false)，
         //    那里用 connectionState == 1 判断是否属于「已连接 → 断开」跳变；此刻若仍是 1，
@@ -1044,13 +1053,18 @@ class SyncForegroundService : Service() {
                     connectionState = 1
                     lanDiscovery.isConnected = true
                     currentPcName = devName ?: "Windows 电脑"
+                    DebugLogger.ok("SVC_ACTION", "PIN 码配对成功: $currentPcName ($ip:$httpPort)")
                     if (!retDevId.isNullOrEmpty()) {
                         currentTargetDeviceId = retDevId
                         val prefs = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
                         prefs.edit()
                             .putString("last_device_id", retDevId)
+                            .putString("last_pc_name", currentPcName)
                             .putString("pin_code_$retDevId", pin)
                             .apply()
+                    } else {
+                        getSharedPreferences("cross_clip_config", MODE_PRIVATE)
+                            .edit().putString("last_pc_name", currentPcName).apply()
                     }
                     // 通知栏文案统一走状态来源
                     updateNotification(statusTextForNotification())
@@ -1059,10 +1073,12 @@ class SyncForegroundService : Service() {
                     callback(true, 200, currentPcName)
                 } else if (statusCode == 403) {
                     connectionState = 2
+                    DebugLogger.err("SVC_ACTION", "PIN 码配对失败 (403): 配对码不匹配 ($ip:$httpPort)")
                     updateNotification("PIN 码错误")
                     callback(false, 403, null)
                 } else {
                     connectionState = 0
+                    DebugLogger.warn("SVC_ACTION", "PIN 码配对失败 ($statusCode): 无法连接 $ip:$httpPort")
                     updateNotification("无法连接到电脑")
                     callback(false, statusCode, null)
                 }
@@ -1115,7 +1131,13 @@ class SyncForegroundService : Service() {
         if (currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
             DebugLogger.log("SVC_SEND", "触发自动同步到 PC ($currentPcIp:$currentHttpPort)")
             HttpUploader.sendClipboard(currentPcIp, currentHttpPort, text, deviceId, pinCode) { success ->
-                DebugLogger.log("SVC_SEND", "自动同步结果: $success")
+                if (success) {
+                    DebugLogger.ok("SVC_SEND", "自动同步成功 (长度 ${text.length})")
+                    // 发送成功才算完成一次同步，计入统计行
+                    SyncStats.record(applicationContext)
+                } else {
+                    DebugLogger.warn("SVC_SEND", "自动同步失败: 电脑端未确认")
+                }
                 onComplete?.invoke(success)
             }
         } else {
@@ -1131,6 +1153,8 @@ class SyncForegroundService : Service() {
 
         val preview = if (text.length > 20) text.take(20) + "..." else text
         DebugLogger.log("CLIP_RECV", "收到电脑端下发剪贴板: 长度=${text.length}, hash=$hash, 预览=[$preview]")
+        // 解密且哈希校验已通过，这是一次完成的接收同步，计入统计行
+        SyncStats.record(applicationContext)
 
         mainHandler.post {
             // 1. 优先尝试 Shizuku 特权静默写入
@@ -1139,11 +1163,11 @@ class SyncForegroundService : Service() {
                 if (written) {
                     Log.i(TAG, "已通过 Shizuku 成功静默写入系统剪贴板")
                     lastSyncEvent = "电脑复制: 已写入"
-                    DebugLogger.log("CLIP_WRITE", "已通过 Shizuku 成功写入系统剪贴板")
+                    DebugLogger.ok("CLIP_WRITE", "已通过 Shizuku 成功写入系统剪贴板")
                     return@post
                 }
                 Log.w(TAG, "Shizuku 写入失败，切换到前台兜底写入")
-                DebugLogger.log("CLIP_WRITE", "Shizuku 写入失败，切换到前台兜底")
+                DebugLogger.warn("CLIP_WRITE", "Shizuku 写入失败，切换到前台兜底")
             }
 
             // 2. 降级方案：常规直接写入
