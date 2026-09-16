@@ -10,7 +10,14 @@ import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
+import android.widget.ImageView
+import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
+import com.crossclip.app.R
 import java.io.File
 
 /**
@@ -241,6 +248,11 @@ object SaveDirManager {
                         DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, documentId),
                         mime
                     )
+                    // 必须把 URI 的临时读授权一并派发给目标应用：ExternalStorageProvider 的
+                    // content URI 需要授权才能访问，系统 DocumentsUI 是特权组件不受此限，
+                    // 但第三方管理器（如 MT）没有授权会拿到 Intent 后静默退出 —— 表现为
+                    // 日志显示「已调起」却毫无反应（startActivity 本身不抛异常）
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
             }
         }
@@ -390,9 +402,10 @@ object SaveDirManager {
     }
 
     /**
-     * 弹出「选择打开保存目录的应用」对话框（图标 + 应用名的简单列表）。
+     * 弹出「选择打开保存目录的应用」对话框（图标 + 应用名的列表）。
      *
      * 用应用内对话框而不是系统 chooser 的原因见 [openDir]：需要捕获用户的选择以记住默认应用。
+     * setItems 只支持纯文本，图标需要自定义行布局（item_dir_opener）。
      */
     fun showOpenerPickerDialog(
         activity: Activity,
@@ -400,10 +413,19 @@ object SaveDirManager {
         onPicked: (DirOpener) -> Unit,
         onDismiss: () -> Unit = {}
     ) {
-        val labels = openers.map { it.label }.toTypedArray()
+        val adapter = object : ArrayAdapter<DirOpener>(activity, R.layout.item_dir_opener, openers) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = convertView
+                    ?: LayoutInflater.from(context).inflate(R.layout.item_dir_opener, parent, false)
+                val opener = getItem(position)!!
+                view.findViewById<ImageView>(R.id.iv_opener_icon).setImageDrawable(opener.icon)
+                view.findViewById<TextView>(R.id.tv_opener_label).text = opener.label
+                return view
+            }
+        }
         val dialog = AlertDialog.Builder(activity)
             .setTitle("选择打开保存目录的应用")
-            .setItems(labels) { _, which ->
+            .setAdapter(adapter) { _, which ->
                 onPicked(openers[which])
             }
             .setNegativeButton("取消", null)
