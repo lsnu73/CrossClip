@@ -248,11 +248,13 @@ object SaveDirManager {
                         DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, documentId),
                         mime
                     )
-                    // 必须把 URI 的临时读授权一并派发给目标应用：ExternalStorageProvider 的
-                    // content URI 需要授权才能访问，系统 DocumentsUI 是特权组件不受此限，
-                    // 但第三方管理器（如 MT）没有授权会拿到 Intent 后静默退出 —— 表现为
-                    // 日志显示「已调起」却毫无反应（startActivity 本身不抛异常）
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    // 注意绝不能加 FLAG_GRANT_READ_URI_PERMISSION：grant flag 只能转发
+                    // 调用方自己持有的 URI 访问权，而这些 document URI 是字符串合成的，
+                    // 本应用对它们没有任何 SAF 授权（写 Download 走的是 File API 豁免通道，
+                    // 与 SAF 授权体系无关）——加 flag 会让 startActivity 对所有目标直接抛
+                    // SecurityException（连系统 DocumentsUI 也被误伤）。不加 flag 时只有
+                    // 特权系统组件（DocumentsUI）能打开；第三方管理器要访问目录必须走
+                    // SAF 授权（即下方自定义目录通道，那条候选是带 flag 的）
                 }
             }
         }
@@ -278,6 +280,14 @@ object SaveDirManager {
         if (parts.size != 2) return null
         return ComponentName(parts[0], parts[1])
     }
+
+    /**
+     * 是否为可免授权打开「合成 document URI」的系统文档组件（DocumentsUI）。
+     * 默认目录（Download/CrossClip）本应用未持有 SAF 授权，只有这类特权组件能打开；
+     * 第三方管理器必然访问失败，调用方可据此向用户提示「改用自定义目录授权」的出路。
+     */
+    fun isPrivilegedDirOpener(component: ComponentName): Boolean =
+        component.packageName.contains("documentsui")
 
     /** 记住用户选中的默认打开方式 */
     fun setPreferredOpener(context: Context, component: ComponentName) {
@@ -354,7 +364,16 @@ object SaveDirManager {
                 if (context !is Activity) {
                     target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                context.startActivity(target)
+                try {
+                    context.startActivity(target)
+                } catch (se: SecurityException) {
+                    // 个别 ROM 对 grant flag 的发送方校验更激进：即使我们持有持久授权也可能
+                    // 误判，剥掉授权标志兜底重试一次（系统 DocumentsUI 本就不需要 flag）
+                    if (target.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) throw se
+                    target.flags = target.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION.inv()
+                    context.startActivity(target)
+                    DebugLogger.log(TAG, "去除 URI 授权标志后重试调起成功 (${component.packageName})")
+                }
                 DebugLogger.log(TAG, "已用 ${component.packageName} 打开保存目录: ${getDisplayPath(context)}")
                 return true
             } catch (e: Exception) {

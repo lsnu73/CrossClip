@@ -626,7 +626,17 @@ class MainActivity : AppCompatActivity() {
                     onPicked = { picked ->
                         SaveDirManager.setPreferredOpener(this, picked.component)
                         if (SaveDirManager.launchDirWith(this, picked.component)) {
-                            Toast.makeText(this, "已记住「${picked.label}」为默认打开方式，长按路径可重新选择", Toast.LENGTH_LONG).show()
+                            // 默认目录本应用未持有 SAF 授权，第三方管理器拿到 URI 也读不了，
+                            // 会表现为「调起成功但毫无反应」——提前告诉用户正规出路：
+                            // 自定义目录（SAF 授权）选同一个文件夹即可用它打开，文件落点不变
+                            val needsSafHint = !SaveDirManager.hasCustomDir(this) &&
+                                !SaveDirManager.isPrivilegedDirOpener(picked.component)
+                            val msg = if (needsSafHint) {
+                                "已记住「${picked.label}」。注意：第三方管理器无权访问默认目录，若打开无反应，请把保存目录改为「自定义目录」并选择同一文件夹授权"
+                            } else {
+                                "已记住「${picked.label}」为默认打开方式，长按路径可重新选择"
+                            }
+                            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                         } else {
                             Toast.makeText(this, "打开保存目录失败", Toast.LENGTH_SHORT).show()
                         }
