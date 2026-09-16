@@ -644,16 +644,17 @@
                     </LinearLayout>
 
                     <!-- 蓝色可点路径：点击=用其他应用打开；长按=重新选择打开方式 -->
+
                     <TextView
                         android:id="@+id/tv_save_dir_path"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
                         android:fontFamily="monospace"
-                        android:text="内部存储/Download/CrossClip"
-                        android:textSize="11.5sp"
                         android:lineSpacingExtra="2dp"
-                        android:textColor="@color/link_blue" />
+                        android:text="/storage/emulated/0/Download/CrossClip/"
+                        android:textColor="@color/link_blue"
+                        android:textSize="11.5sp" />
 
                     <TextView
                         android:id="@+id/tv_reset_save_dir"
