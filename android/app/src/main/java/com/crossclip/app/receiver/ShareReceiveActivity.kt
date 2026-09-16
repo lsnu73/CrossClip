@@ -26,6 +26,24 @@ class ShareReceiveActivity : Activity() {
     companion object {
         private const val CHANNEL_ID_FILE = "crossclip_file_transfer"
         private const val NOTIFICATION_ID_UPLOAD = 2001
+
+        /**
+         * 清理分享中转目录里的陈旧副本（服务启动时调用）。
+         *
+         * #### 为什么按「修改时间超过 24 小时」而不是全删
+         * 分享上传在后台线程里跑，触发本清理时 Activity 早已 finish，无法从内存判断
+         * 哪些副本仍在上传中；但单文件上传最多 120 秒即超时，超过 24 小时未删除的
+         * 副本只可能是历史残留（进程被杀、崩溃等），删它绝对安全。
+         */
+        fun cleanupShareTempFiles(context: Context, maxAgeMs: Long = 24 * 60 * 60 * 1000L) {
+            try {
+                val tempDir = File(context.cacheDir, "share_temp")
+                val cutoff = System.currentTimeMillis() - maxAgeMs
+                tempDir.listFiles()?.forEach { if (it.lastModified() < cutoff) it.delete() }
+            } catch (e: Exception) {
+                DebugLogger.log("SHARE_RECEIVE", "清理分享临时目录失败: ${e.message}")
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -139,6 +157,8 @@ class ShareReceiveActivity : Activity() {
                 }
             },
             onSuccess = {
+                // 上传终结即删中转副本：缓存目录只做「复制→上传」的中转，不落地留存
+                deleteTempFile(file)
                 showUploadCompleteNotification(filename)
                 runOnUiThread {
                     Toast.makeText(this, "文件已发送: $filename", Toast.LENGTH_SHORT).show()
@@ -147,6 +167,8 @@ class ShareReceiveActivity : Activity() {
             },
             onError = { error ->
                 DebugLogger.log("SHARE_RECEIVE", "文件上传失败: $error")
+                // 失败同样删除：没有自动重试机制，留着只是缓存垃圾；用户重试会重新复制
+                deleteTempFile(file)
                 // 关键修复：失败时同样要更新通知，清除卡在进度条的「正在发送」状态
                 showUploadFailedNotification(filename, error)
                 runOnUiThread {
@@ -187,10 +209,12 @@ class ShareReceiveActivity : Activity() {
             },
             onSuccess = { _ ->
                 DebugLogger.log("SHARE_RECEIVE", "多文件上传成功: $filename")
+                deleteTempFile(file)
                 showUploadCompleteNotification(filename)
                 latch.countDown()
             },
             onError = { error ->
+                deleteTempFile(file)
                 showUploadFailedNotification(filename, error)
                 resultError = error
                 latch.countDown()
@@ -200,6 +224,18 @@ class ShareReceiveActivity : Activity() {
         latch.await(120, java.util.concurrent.TimeUnit.SECONDS)
         if (resultError != null) {
             DebugLogger.log("SHARE_RECEIVE", "多文件上传失败: $filename, error=$resultError")
+        }
+    }
+
+    /** 删除分享中转副本（上传已终结，副本使命结束）；失败只记日志，不影响上传结果回调 */
+    private fun deleteTempFile(file: File) {
+        try {
+            val size = file.length()
+            if (file.delete()) {
+                DebugLogger.log("SHARE_RECEIVE", "已清理分享中转文件: ${file.name} ($size bytes)")
+            }
+        } catch (e: Exception) {
+            DebugLogger.log("SHARE_RECEIVE", "清理分享中转文件失败: ${e.message}")
         }
     }
 

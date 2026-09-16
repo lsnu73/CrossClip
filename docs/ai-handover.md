@@ -641,7 +641,7 @@ cd android && ./gradlew assembleRelease
 | 版本 | 位置 | 用途 |
 | :--- | :--- | :--- |
 | git tag `2.x.y` | 仓库标签 | **发版主线**。功能合入后打小版本(tag 2.1.0 → 2.1.1), 与 Android/桌面端无关, 代表「一次双端发布」 |
-| `versionName` / `versionCode` | `android/app/build.gradle.kts` | 仅用于确认手机上装的 APK 是哪一版(发版时递增, 当前 1.1.2 / 19) |
+| `versionName` / `versionCode` | `android/app/build.gradle.kts` | 确认手机上装的 APK 是哪一版(发版时递增)。自 2.1.2 起 versionName 与 git tag 同步, versionCode 独立自增(当前 2.1.2 / 20) |
 | `version` | `rust_desktop/Cargo.toml` | 历史上不跟随发布更新, **不要用它判断新旧** |
 
 - 协议文档(`protocol.md`)里标注的字段引入版本一律以 git tag 书写(如 `tag 2.1.1+`);

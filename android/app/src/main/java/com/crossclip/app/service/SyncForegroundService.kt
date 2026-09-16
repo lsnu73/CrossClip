@@ -30,6 +30,7 @@ import com.crossclip.app.network.LocalHttpServer
 import com.crossclip.app.network.NsdHelper
 import com.crossclip.app.network.FileReceiver
 import com.crossclip.app.network.SseClient
+import com.crossclip.app.receiver.ShareReceiveActivity
 import com.crossclip.app.shizuku.ShizukuClipboardManager
 import com.crossclip.app.shizuku.ShizukuPrivilegeHelper
 import com.crossclip.app.ui.ClipWriteActivity
@@ -253,6 +254,12 @@ class SyncForegroundService : Service() {
 
         ShizukuClipboardManager.init(applicationContext)
         ShizukuPrivilegeHelper.applySystemWhitelists(applicationContext)
+
+        // 清理上次运行残留的中转文件，防止缓存无限膨胀：
+        //  - 接收临时目录：进程中途被杀时 .tmp 会残留，且中断的传输不支持续传，全清安全；
+        //  - 分享中转目录：只清超过 24 小时的陈旧副本，避免误删仍在后台上传中的文件。
+        FileReceiver.cleanupTempFiles(applicationContext)
+        ShareReceiveActivity.cleanupShareTempFiles(applicationContext)
 
         clipboardManager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         clipboardManager.addPrimaryClipChangedListener(clipListener)

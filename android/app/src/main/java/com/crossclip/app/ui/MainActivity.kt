@@ -12,9 +12,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -42,6 +45,7 @@ class MainActivity : AppCompatActivity() {
     /** 「重新扫描」按钮容器（含旋转箭头与文案）；点击区域覆盖整个按钮，而不只是文字 */
     private lateinit var btnRefreshScan: View
     private lateinit var etPinCode: EditText
+    private lateinit var ivClearPin: ImageView
     private lateinit var btnConnectPc: Button
     private lateinit var tvToggleManualIp: TextView
     private lateinit var llManualIpContainer: LinearLayout
@@ -180,7 +184,22 @@ class MainActivity : AppCompatActivity() {
         llDeviceHeader = findViewById(R.id.ll_device_header)
         btnRefreshScan = findViewById(R.id.btn_refresh_scan)
         etPinCode = findViewById(R.id.et_pin_code)
+        ivClearPin = findViewById(R.id.iv_clear_pin)
         btnConnectPc = findViewById(R.id.btn_connect_pc)
+
+        // PIN 输入框清除按钮：有内容即显示（含程序化 setText 的场景，故用 TextWatcher 驱动），
+        // 点击立即清空并让输入框重新获得焦点，方便直接输入新码
+        etPinCode.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                ivClearPin.visibility = if (etPinCode.text.isNotEmpty()) View.VISIBLE else View.GONE
+            }
+        })
+        ivClearPin.setOnClickListener {
+            etPinCode.setText("")
+            etPinCode.requestFocus()
+        }
         tvToggleManualIp = findViewById(R.id.tv_toggle_manual_ip)
         llManualIpContainer = findViewById(R.id.ll_manual_ip_container)
         etManualIp = findViewById(R.id.et_manual_ip)

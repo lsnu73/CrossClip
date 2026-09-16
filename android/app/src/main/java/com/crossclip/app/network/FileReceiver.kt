@@ -250,12 +250,19 @@ object FileReceiver {
         DebugLogger.log(TAG, "已取消文件接收: $fileId")
     }
 
-    /** 清理所有残留的临时文件（服务销毁或启动时调用） */
+    /**
+     * 清理残留的临时文件（服务启动时调用）。
+     *
+     * 只删不属于任何活跃接收任务的文件：中断的传输不支持续传（[prepareReceive] 会删掉
+     * 同名残留重新收），留着只有变成缓存垃圾；而活跃任务正在写入的临时文件必须保留。
+     */
     fun cleanupTempFiles(context: Context) {
         try {
             val tempDir = File(context.cacheDir, TEMP_DIR_NAME)
-            tempDir.listFiles()?.forEach { it.delete() }
-            activeTransfers.clear()
+            val activePaths = activeTransfers.values.map { it.tempFile.absolutePath }.toHashSet()
+            tempDir.listFiles()?.forEach {
+                if (it.absolutePath !in activePaths) it.delete()
+            }
         } catch (e: Exception) {
             DebugLogger.log(TAG, "清理临时文件失败: ${e.message}")
         }
