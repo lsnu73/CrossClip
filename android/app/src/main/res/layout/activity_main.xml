@@ -175,33 +175,38 @@
                     android:gravity="center_vertical"
                     android:layout_marginTop="12dp">
 
-                    <EditText
-                        android:id="@+id/et_pin_code"
+                    <!-- FrameLayout 叠放：清除图标悬浮在输入框内部右侧，而非占独立一格 -->
+                    <FrameLayout
                         android:layout_width="0dp"
                         android:layout_height="46dp"
-                        android:layout_weight="1"
-                        android:hint="输入 6 位 PIN 码"
-                        android:inputType="number"
-                        android:maxLength="6"
-                        android:textSize="16sp"
-                        android:textStyle="bold"
-                        android:gravity="center"
-                        android:letterSpacing="0.15"
-                        android:background="#F1F5F9"
-                        android:paddingStart="12dp"
-                        android:paddingEnd="12dp" />
+                        android:layout_weight="1">
 
-                    <!-- 已有 PIN 码时显示，点击清空输入框 -->
-                    <ImageView
-                        android:id="@+id/iv_clear_pin"
-                        android:layout_width="30dp"
-                        android:layout_height="46dp"
-                        android:layout_marginStart="4dp"
-                        android:padding="6dp"
-                        android:src="@drawable/ic_clear_pin"
-                        android:contentDescription="清除 PIN 码"
-                        android:background="?attr/selectableItemBackgroundBorderless"
-                        android:visibility="gone" />
+                        <EditText
+                            android:id="@+id/et_pin_code"
+                            android:layout_width="match_parent"
+                            android:layout_height="46dp"
+                            android:hint="输入 6 位 PIN 码"
+                            android:inputType="number"
+                            android:maxLength="6"
+                            android:textSize="16sp"
+                            android:textStyle="bold"
+                            android:gravity="center"
+                            android:letterSpacing="0.15"
+                            android:background="#F1F5F9"
+                            android:paddingStart="12dp"
+                            android:paddingEnd="40dp" />
+
+                        <ImageView
+                            android:id="@+id/iv_clear_pin"
+                            android:layout_width="34dp"
+                            android:layout_height="46dp"
+                            android:layout_gravity="end|center_vertical"
+                            android:padding="7dp"
+                            android:src="@drawable/ic_clear_pin"
+                            android:contentDescription="清除 PIN 码"
+                            android:background="?attr/selectableItemBackgroundBorderless"
+                            android:visibility="gone" />
+                    </FrameLayout>
 
                     <Button
                         android:id="@+id/btn_connect_pc"

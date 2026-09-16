@@ -187,19 +187,21 @@ class MainActivity : AppCompatActivity() {
         ivClearPin = findViewById(R.id.iv_clear_pin)
         btnConnectPc = findViewById(R.id.btn_connect_pc)
 
-        // PIN 输入框清除按钮：有内容即显示（含程序化 setText 的场景，故用 TextWatcher 驱动），
-        // 点击立即清空并让输入框重新获得焦点，方便直接输入新码
+        // PIN 输入框清除按钮：显隐由 TextWatcher 驱动（覆盖程序化 setText 的所有场景），
+        // 可点性随输入框启用状态走（已连接时输入框被禁用 → 图标置灰不可点）。
+        // 点击清空并让输入框重新获得焦点，方便直接输入新码
         etPinCode.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
-                ivClearPin.visibility = if (etPinCode.text.isNotEmpty()) View.VISIBLE else View.GONE
+                updateClearPinState()
             }
         })
         ivClearPin.setOnClickListener {
             etPinCode.setText("")
             etPinCode.requestFocus()
         }
+        updateClearPinState()
         tvToggleManualIp = findViewById(R.id.tv_toggle_manual_ip)
         llManualIpContainer = findViewById(R.id.ll_manual_ip_container)
         etManualIp = findViewById(R.id.et_manual_ip)
@@ -429,6 +431,7 @@ class MainActivity : AppCompatActivity() {
             if (service.connectionState == 1) {
                 service.disconnectCurrentPc()
                 etPinCode.isEnabled = true
+                updateClearPinState()
                 etPinCode.setText("")
                 btnConnectPc.text = "一键连接"
                 Toast.makeText(this, "已断开与电脑的连接", Toast.LENGTH_SHORT).show()
@@ -463,14 +466,17 @@ class MainActivity : AppCompatActivity() {
                 if (success) {
                     btnConnectPc.text = "断开连接"
                     etPinCode.isEnabled = false
+                    updateClearPinState()
                     Toast.makeText(this, "配对成功！设备: $name", Toast.LENGTH_SHORT).show()
                 } else if (statusCode == 403) {
                     btnConnectPc.text = "一键连接"
                     etPinCode.isEnabled = true
+                    updateClearPinState()
                     Toast.makeText(this, "PIN 码不匹配！电脑端已生成新 PIN 码，请右键电脑右下角托盘查看", Toast.LENGTH_LONG).show()
                 } else {
                     btnConnectPc.text = "一键连接"
                     etPinCode.isEnabled = true
+                    updateClearPinState()
                     Toast.makeText(this, "连接超时，请确认手机和电脑在同一局域网", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -539,6 +545,20 @@ class MainActivity : AppCompatActivity() {
             .setMessage(guideMessage)
             .setPositiveButton("知道了", null)
             .show()
+    }
+
+    /**
+     * 同步 PIN 清除图标状态：
+     *  - 输入框有内容才显示，空态恢复纯输入框样式（覆盖程序化 setText 的所有场景）；
+     *  - 已连接时输入框被禁用（etPinCode.isEnabled=false），图标同步置灰且不可点击 ——
+     *    此时框里的 PIN 是当前连接的记忆，不允许随手清掉。
+     * 须在 TextWatcher 与所有 etPinCode.isEnabled 变更点之后调用。
+     */
+    private fun updateClearPinState() {
+        ivClearPin.visibility = if (etPinCode.text.isNotEmpty()) View.VISIBLE else View.GONE
+        val clickable = etPinCode.isEnabled
+        ivClearPin.isEnabled = clickable
+        ivClearPin.alpha = if (clickable) 1f else 0.35f
     }
 
     private fun loadConfig() {
@@ -724,6 +744,7 @@ class MainActivity : AppCompatActivity() {
                 val devPin = sp.getString("pin_code_${chosen.deviceId}", "") ?: ""
                 etPinCode.setText(devPin)
                 etPinCode.isEnabled = true
+                updateClearPinState()
                 btnConnectPc.text = "一键连接"
                 Toast.makeText(this, "已切换目标电脑: ${chosen.name} (${chosen.ip})", Toast.LENGTH_SHORT).show()
                 dialog.dismiss()
@@ -812,6 +833,7 @@ class MainActivity : AppCompatActivity() {
                     btnConnectPc.text = "断开连接"
                     btnConnectPc.isEnabled = true
                     etPinCode.isEnabled = false
+                    updateClearPinState()
                 }
                 2 -> {
                     tvStatus.text = "● PIN 码不匹配 (电脑已换码，请输入新码重连)"
@@ -819,6 +841,7 @@ class MainActivity : AppCompatActivity() {
                     btnConnectPc.text = "一键连接"
                     btnConnectPc.isEnabled = true
                     etPinCode.isEnabled = true
+                    updateClearPinState()
                 }
                 -1 -> {
                     tvStatus.text = "● 正在验证密文挑战握手..."
@@ -830,6 +853,7 @@ class MainActivity : AppCompatActivity() {
                     btnConnectPc.text = "一键连接"
                     btnConnectPc.isEnabled = true
                     etPinCode.isEnabled = true
+                    updateClearPinState()
                     when {
                         liveTarget != null -> {
                             tvStatus.text = "● 已发现目标电脑，请输入 6 位 PIN 码连接"
