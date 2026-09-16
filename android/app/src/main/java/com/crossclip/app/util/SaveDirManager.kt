@@ -234,9 +234,20 @@ object SaveDirManager {
             "application/x-directory"
         )
         // 优先：用户授权过的自定义目录（SAF tree URI，只支持目录 MIME 这一种形态）
-        getCustomDirUri(context)?.let { uri ->
+        getCustomDirUri(context)?.let { treeUri ->
             intents += Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
+                // 必须转成「挂在 tree 授权下的 document URI」再外发：裸 tree URI 只有
+                // DocumentsContract 的 tree API 认识，第三方管理器按 document 形态解析
+                // （getDocumentId 要求路径含 /document/ 段）会直接失败并静默退出 ——
+                // startActivity 发射后不管，日志只会记「已调起」看不出对端死活。
+                // buildDocumentUriUsingTree 生成的 URI 内嵌 tree 前缀，授权可随 flag
+                // 转发，document 路径形态才是各管理器（MT「定位所在位置」等）认识的
+                setDataAndType(
+                    DocumentsContract.buildDocumentUriUsingTree(
+                        treeUri, DocumentsContract.getTreeDocumentId(treeUri)
+                    ),
+                    DocumentsContract.Document.MIME_TYPE_DIR
+                )
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
         }
