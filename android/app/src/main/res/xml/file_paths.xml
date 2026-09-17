@@ -7,13 +7,15 @@
          StringIndexOutOfBoundsException（length=56; index=57）。
          改为下面退一级的 external_data_root 统一覆盖外部私有目录（含 files 子目录）。 -->
     <files-path name="internal_files" path="." />
-    <!-- 暴露默认保存目录 Download/CrossClip，供「点击路径打开目录」功能使用 -->
-    <external-path name="external_downloads" path="Download/CrossClip/" />
+    <!-- 覆盖整个主存储（含 Download/CrossClip 与任意 SAF 自定义目录），
+         供「点击路径打开目录」把目录转成 FileProvider content URI 外发。
+         name 与 open_file 插件一致（external-path），第三方管理器（MT 等）
+         对这种「/external-path/<绝对路径>」形态有成熟的路径还原逻辑。
+         注意：file_paths.xml 不支持 ${applicationId} 占位符。 -->
+    <external-path name="external-path" path="." />
     <!-- 暴露 App 私有外部目录 Android/data/<包名>（即 files 子目录的父级）：
          日志目录位于其下的 files/ 子目录，因此对日志目录生成 URI 时得到的是子路径而非根路径，
-         不会触发上述越界异常。
-         注意：file_paths.xml 不支持 ${applicationId} 占位符，此处的包名必须与
-         build.gradle.kts 里的 applicationId 保持一致。 -->
+         不会触发上述越界异常。 -->
     <external-path name="external_data_root" path="Android/data/com.crossclip.app/" />
     <!-- 暴露 App 私有缓存目录，供文件接收的临时中转文件使用 -->
     <cache-path name="cache_files" path="." />

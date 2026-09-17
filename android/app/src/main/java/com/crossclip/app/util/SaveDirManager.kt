@@ -1,13 +1,14 @@
 package com.crossclip.app.util
 
 import android.app.Activity
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
+import androidx.core.content.FileProvider
 import java.io.File
 
 /**
@@ -35,9 +36,6 @@ object SaveDirManager {
 
     /** 无扩展名时创建 SAF 文档使用的兜底 MIME */
     private const val FALLBACK_MIME = "application/octet-stream"
-
-    /** 外部存储 SAF 文档提供者（DocumentsUI / 文件管理器据此解析 `primary:Download/...` 文档 ID） */
-    private const val EXTERNAL_STORAGE_AUTHORITY = "com.android.externalstorage.documents"
 
     // ==================== 目录配置读写 ====================
 
@@ -204,85 +202,117 @@ object SaveDirManager {
     // ==================== 用其他应用打开目录 ====================
 
     /**
-     * 打开当前保存目录（对齐 LocalSend 的方案：隐式 Intent 交系统 resolver）。
+     * 打开当前保存目录（照抄 LocalSend「打开目录」的实现，见 ai-handover §7 #21/#22）。
      *
-     * Android 没有「打开任意目录」的官方标准 Intent，可行路径只有两条：
-     *  - **自定义目录**：本应用持有 SAF 持久授权，把「挂在 tree 授权下的 document URI」
-     *    （裸 tree URI 第三方解析不了，见 §7 #20）以隐式 VIEW Intent 外发并转发读授权，
-     *    候选枚举 / 图标 / 「仅此一次/总是」记住默认全部交给系统「打开方式」——resolver
-     *    在系统侧解析，不受本应用包可见性约束（§7 #18），第三方管理器（MT「定位所在
-     *    位置」等）可正常打开。此前自绘选择列表 + 三套 MIME 探测 + 自记默认的全套机制
-     *    在排障三层后仍有目标静默退出，整体废弃（§7 #21）。
-     *  - **默认目录**：document URI 是合成的、本应用无 SAF 授权可转发（§7 #19），第三方
-     *    必然访问失败，只有特权系统组件 DocumentsUI（「文件」）能开 —— 直接显式调起它，
-     *    不弹一堆必然失败的候选。
+     * LocalSend 经 open_file_android 插件打开目录的实际做法（本地源码核实）：
+     *  1. 用**自己的 FileProvider** 把目录真实路径转成 content URI —— URI 的 path 里
+     *     内嵌绝对路径（`/external-path/storage/emulated/0/...`），第三方管理器（MT
+     *     「定位所在位置」等）正是靠还原这个路径打开目录的；
+     *  2. MIME 用「通配类型」（asterisk-slash-asterisk；目录没有扩展名，插件的扩展名
+     *     匹配兜底就是它）—— 系统 resolver 因此会列出所有「能看任意内容」的应用，
+     *     选择列表才会像 LocalSend 那样丰富（MT 全家、微信、网盘……）；
+     *     窄口径的 vnd.android.document/directory 只能匹配明确注册了目录 MIME 的少数应用；
+     *  3. `grantUriPermission` 对全部能解析的应用**逐个预授权**（读写），外加 intent 上的
+     *     grant flag，第三方拿到 URI 不会因权限被拒；
+     *  4. 隐式 `startActivity`，候选枚举 / 图标 / 「仅此一次/总是」全部交给系统 resolver。
+     *
+     * 真实路径的来源：默认目录本来就有一个；SAF 自定义目录若在主存储上（tree 文档 ID
+     * 形如 `primary:xxx`）可还原出绝对路径。还原不了（SD 卡等二级存储）则退回 SAF
+     * document URI 隐式调起（授权在握，但列表口径较窄）。
      *
      * @param forceChooser true（长按）时用系统选择框强制重选；不影响系统里已设的「总是」默认
      * @return 是否成功调起（false 时调用方应提示用户）
      */
     fun openDir(context: Context, forceChooser: Boolean = false): Boolean {
-        val customUri = getCustomDirUri(context)
-        if (customUri != null) {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(
-                    DocumentsContract.buildDocumentUriUsingTree(
-                        customUri, DocumentsContract.getTreeDocumentId(customUri)
-                    ),
-                    DocumentsContract.Document.MIME_TYPE_DIR
-                )
-                // 自定义目录有 SAF 持久授权在握，grant flag 转发安全（§7 #19）
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            // createChooser 同样会把 target 的 grant flag 转发给用户选中的目标（API 24+）
-            val toStart = if (forceChooser) {
-                Intent.createChooser(intent, "选择打开保存目录的应用")
-            } else {
-                intent
-            }
-            return startDirActivity(context, toStart, "系统「打开方式」")
+        resolveOpenableDirPath(context)?.let { dirPath ->
+            return openDirViaFileProvider(context, dirPath, forceChooser)
         }
+        return openDirViaSafDocumentUri(context, forceChooser)
+    }
 
-        // 默认目录：唯一确定能打开的是系统「文件」（DocumentsUI，特权组件），直接调起
-        findDocumentsUi(context)?.let { component ->
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(
-                    DocumentsContract.buildDocumentUri(
-                        EXTERNAL_STORAGE_AUTHORITY, "primary:Download/$DEFAULT_SUBDIR"
-                    ),
-                    DocumentsContract.Document.MIME_TYPE_DIR
-                )
-                setComponent(component)
-            }
-            return startDirActivity(context, intent, "系统「文件」(${component.packageName})")
+    /** 还原保存目录的真实路径；主存储之外的自定义目录返回 null */
+    private fun resolveOpenableDirPath(context: Context): String? {
+        val customUri = getCustomDirUri(context) ?: return getDefaultDir().absolutePath
+        val docId = try {
+            DocumentsContract.getTreeDocumentId(customUri)
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        if (!docId.startsWith("primary:")) return null
+        // primary: 前缀对应主存储，document ID 的其余部分就是相对路径
+        return "${Environment.getExternalStorageDirectory().absolutePath}/${docId.removePrefix("primary:")}"
+    }
+
+    /** LocalSend / open_file 同款：FileProvider URI + 通配 MIME + 逐应用预授权 + 隐式调起 */
+    private fun openDirViaFileProvider(context: Context, dirPath: String, forceChooser: Boolean): Boolean {
+        val dir = File(dirPath)
+        if (!dir.exists() && !dir.mkdirs()) {
+            DebugLogger.log(TAG, "保存目录不存在且创建失败: $dirPath")
         }
-        // 极少数精简 ROM 没有 DocumentsUI：退回隐式调起，能开就开
-        DebugLogger.log(TAG, "未找到系统文档组件（DocumentsUI），隐式调起默认目录")
-        val fallback = Intent(Intent.ACTION_VIEW).apply {
+        val uri = try {
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", dir)
+        } catch (e: Exception) {
+            DebugLogger.log(TAG, "FileProvider 生成目录 URI 失败: ${e.message}")
+            return false
+        }
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            addCategory(Intent.CATEGORY_DEFAULT)
+            setDataAndType(uri, "*/*")
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        }
+        grantToResolvers(context, uri, intent)
+        val toStart = if (forceChooser) {
+            Intent.createChooser(intent, "选择打开保存目录的应用")
+        } else {
+            intent
+        }
+        return startDirActivity(context, toStart, "FileProvider")
+    }
+
+    /** 照抄 open_file：把 URI 权限预先授给所有能解析的应用（grant flag 之外的再兜一层） */
+    private fun grantToResolvers(context: Context, uri: Uri, intent: Intent) {
+        try {
+            val resolvers = context.packageManager.queryIntentActivities(
+                intent, PackageManager.MATCH_DEFAULT_ONLY
+            )
+            for (ri in resolvers) {
+                try {
+                    context.grantUriPermission(
+                        ri.activityInfo.packageName,
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    )
+                } catch (_: Exception) {
+                }
+            }
+        } catch (e: Exception) {
+            // 包可见性会裁剪该查询结果（Manifest 的 <queries> 已覆盖常见文件管理器），
+            // 漏掉的应用还有 intent 上的 grant flag 在 startActivity 时由系统补授，不阻断
+            DebugLogger.log(TAG, "预授权候选应用时部分失败(可忽略): ${e.message}")
+        }
+    }
+
+    /** 主存储之外的自定义目录（无法还原真实路径）：SAF document URI 隐式调起（§7 #20） */
+    private fun openDirViaSafDocumentUri(context: Context, forceChooser: Boolean): Boolean {
+        val customUri = getCustomDirUri(context) ?: return false
+        val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(
-                DocumentsContract.buildDocumentUri(
-                    EXTERNAL_STORAGE_AUTHORITY, "primary:Download/$DEFAULT_SUBDIR"
+                DocumentsContract.buildDocumentUriUsingTree(
+                    customUri, DocumentsContract.getTreeDocumentId(customUri)
                 ),
                 DocumentsContract.Document.MIME_TYPE_DIR
             )
+            // 自定义目录有 SAF 持久授权在握，grant flag 转发安全（§7 #19）
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        return startDirActivity(context, fallback, "隐式")
-    }
-
-    /** 查询系统文档组件（DocumentsUI，包名含 documentsui）中能开目录的那个 Activity */
-    private fun findDocumentsUi(context: Context): ComponentName? {
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(
-                DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, "primary:Download"),
-                DocumentsContract.Document.MIME_TYPE_DIR
-            )
+        val toStart = if (forceChooser) {
+            Intent.createChooser(intent, "选择打开保存目录的应用")
+        } else {
+            intent
         }
-        val resolvers = try {
-            context.packageManager.queryIntentActivities(intent, 0)
-        } catch (_: Exception) {
-            emptyList()
-        }
-        return resolvers.firstOrNull { it.activityInfo.packageName.contains("documentsui") }
-            ?.let { ComponentName(it.activityInfo.packageName, it.activityInfo.name) }
+        return startDirActivity(context, toStart, "SAF document URI")
     }
 
     private fun startDirActivity(context: Context, intent: Intent, via: String): Boolean {

@@ -28,10 +28,17 @@
         android:maxSdkVersion="32" />
 
     <!-- Android 11+ 包可见性：queryIntentActivities 只能看到此处声明匹配的应用。
-         SaveDirManager.findDocumentsUi 需要按「VIEW + content + 目录 MIME」查询系统
-         文档组件（DocumentsUI），不声明的话查询结果在系统侧被裁剪、永远为空。
+         SaveDirManager 的「预授权全部候选应用」按「VIEW + content + */*」查询，
+         不声明的话查询结果被裁剪、预授权覆盖不全（漏掉的应用靠 intent 上的
+         grant flag 在 startActivity 时由系统补授，不阻断）。
          用户可见的「打开方式」候选枚举发生在系统 resolver，不受此声明影响。 -->
     <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data
+                android:scheme="content"
+                android:mimeType="*/*" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data

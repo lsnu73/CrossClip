@@ -592,6 +592,7 @@ hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
 | 19 | 选择列表里选了第三方管理器(如 MT「定位所在位置」), 日志显示「已调起」但手机毫无反应; 给候选补上 grant flag 后更严重: `startActivity` 直接抛 `SecurityException: UID does not have permission to content://...`, 连系统「文件」都打不开 | 默认目录的 document URI 是 `buildDocumentUri` **字符串合成**的, 本应用对它没有 SAF 授权(写 `Download/CrossClip` 走 Android 11 的 File API 豁免通道, 与 SAF URI 授权体系**完全无关**)。而 `FLAG_GRANT_READ_URI_PERMISSION` 只能**转发调用方自己持有**的访问权: 不带 flag → 第三方应用拿到 URI 无权读、静默退出(特权组件 DocumentsUI 不受限, 所以只有它能开); 带 flag → 系统做发送方校验, 我们不持有授权 → 对所有目标抛 SecurityException(与目标是谁无关) | 默认目录候选**不带** flag(只能指望特权系统组件); 自定义目录(SAF `takePersistableUriPermission` 已持有授权)候选**必须带** flag, 第三方管理器因此可正常打开; `launchDirWith` 对 SecurityException 再兜一层「剥 flag 重试」防 ROM 校验差异。第三方要访问默认目录的正规出路: 引导用户把保存目录设为「自定义目录」并选同一文件夹(SAF 授权), 文件落点不变。教训: **grant flag 不是万金油 —— 自己没授权的 URI, 加 flag 反而把能用的路径也炸掉;「调起成功」≠「打开成功」** |
 | 20 | 按引导把 Download/CrossClip 设为自定义目录(SAF 授权)后, 第三方管理器**仍然**打不开: 发送方校验已通过(startActivity 不再抛异常), 日志「已调起」但对端依旧静默退出 | 自定义目录候选外发的是**裸 tree URI**(`.../tree/primary:Download/CrossClip`, SAF 目录授权的原生形态): tree URI 只有 DocumentsContract 的 tree API 认识, 第三方管理器按 document 形态解析(`getDocumentId` 要求路径含 `/document/` 段)直接抛异常退出; 发送方持有授权所以不炸我们这边, 日志全程绿灯 | 外发前用 `buildDocumentUriUsingTree(treeUri, getTreeDocumentId(treeUri))` 转成**内嵌 tree 前缀的 document URI**(即 `saveToCustomDir` 写文件已在用的形态), 授权照常随 flag 转发, document 路径才是各管理器认识的样子。教训: **tree URI 只在自己进程内用; 出进程必须转成 document URI** |
 | 21 | 自绘「打开保存目录」选择列表(三 MIME 并集 + 图标列表 + 自记默认应用)在 #18/#19/#20 三层逐个排障后, 第三方管理器对显式组件调起仍可能静默退出; 对照 LocalSend(实测其「打开目录」弹完整系统列表且第三方可开)发现差异只在「显式 vs 隐式」 | LocalSend 的实现(`FileOpener.openUri`): 只发**隐式** VIEW Intent(document URI + 目录 MIME + grant flag), 候选枚举/图标/记住默认全部交给系统 resolver —— resolver 在系统侧解析, 不受本应用包可见性约束, 「仅此一次/总是」原生支持; 显式 setComponent 调起则把解析责任留在对端, 对端解析失败我们无感知 | 对齐 LocalSend: 自定义目录 → 隐式 Intent 交系统「打开方式」(长按用 `createChooser` 强制重选, grant 照常转发); 默认目录 → 直接显式调起 DocumentsUI(唯一特权可开者); 整体删除自绘选择器/三 MIME 探测/自记默认全套机制。教训: **能在系统层解决的事(选应用/记默认)不要在应用层重造; 排障排到第三层仍不通, 优先怀疑方案本身而非继续打补丁** |
+| 22 | #21 对齐后选择列表仍比 LocalSend 的少得多: LocalSend 的「打开方式」横跨十几页(MT 全家桶、微信、网盘), 我们只匹配到少数注册目录 MIME 的应用 | 扒 LocalSend 完整源码发现「打开目录」走的根本不是原生 `FileOpener.openUri`, 而是 `open_folder.dart` → `open_file` 插件(`open_file_android-1.1.0`, OpenFilePlugin.startActivity + FileUtil): ① 用**自己的 FileProvider** 把目录真实路径转成 content URI(`<authority>/external-path/storage/emulated/0/Download`, path 内嵌绝对路径, MT「定位所在位置」正是靠还原它定位的); ② 目录无扩展名, 插件扩展名表兜底为 **`*/*`** —— resolver 因此列出所有「能看任意内容」的应用; ③ `grantUriPermission` 对全部 resolver **逐个预授权**(读写), intent 上再加 grant flag; ④ 隐式调起。我们此前发的是 `vnd.android.document/directory` 窄口径 + 无授权的合成 document URI, 三样全不沾 | 完整照抄: `resolveOpenableDirPath`(默认目录路径 / `primary:xxx` tree ID 还原绝对路径) → FileProvider(file_paths 补 `<external-path path="."/>`, name 也用 `external-path` 保证管理器路径还原兼容) → `ACTION_VIEW + CATEGORY_DEFAULT + *//* + GRANT_READ\|WRITE` → `grantToResolvers` 逐应用预授权 → 隐式调起。二级存储(SDCard)自定义目录还原不了路径时退回 SAF document URI 通道。教训: **「照抄」要抄到源码层 —— 只从界面行为倒推的实现(#21)会漏掉 FileProvider/`*/*`/预授权三个关键细节** |
 
 ---
 
@@ -634,9 +635,9 @@ cd android && ./gradlew assembleRelease
 - [ ] 自定义保存目录后重启 App 仍能写入;
 - [ ] 手机向电脑发文件, 完成后点击右下角浮窗能打开文件所在目录; 「文件夹打开方式」被
   第三方管理器(Total Commander 等)接管时应拉起第三方而非 explorer(§3.15);
-- [ ] Android 点击保存目录路径弹系统「打开方式」(自定义目录场景, 含仅此一次/总是),
-  第三方管理器(MT 等)可选且能真正打开并定位; 长按路径强制重弹选择框;
-  默认目录场景直接调起系统「文件」(§7 #18-#21)。
+- [ ] Android 点击保存目录路径弹系统「打开方式」(含仅此一次/总是), 候选丰富
+  (MT 全家、微信等, 与 LocalSend 同量级), 第三方管理器可选且能真正打开并定位;
+  长按路径强制重弹选择框; 默认/自定义目录均走 FileProvider 通道(§7 #18-#22)。
 
 ### 8.4 版本与发布约定
 
