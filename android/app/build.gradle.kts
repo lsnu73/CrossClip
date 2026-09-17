@@ -11,8 +11,8 @@ android {
         applicationId = "com.crossclip.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 23
-        versionName = "2.2.2"
+        versionCode = 24
+        versionName = "2.3.0"
     }
 
     signingConfigs {
