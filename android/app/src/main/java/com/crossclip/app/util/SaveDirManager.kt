@@ -4,20 +4,10 @@ import android.app.Activity
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.graphics.drawable.Drawable
 import android.net.Uri
-import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.util.Log
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
-import android.widget.ArrayAdapter
-import android.widget.ImageView
-import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
-import com.crossclip.app.R
 import java.io.File
 
 /**
@@ -39,7 +29,6 @@ object SaveDirManager {
     private const val PREF_NAME = "cross_clip_config"
     private const val KEY_CUSTOM_DIR_URI = "custom_save_dir_uri"
     private const val KEY_CUSTOM_DIR_LABEL = "custom_save_dir_label"
-    private const val KEY_PREF_DIR_OPENER = "preferred_dir_opener"
 
     /** 默认模式下的子目录名（位于系统下载目录内） */
     private const val DEFAULT_SUBDIR = "CrossClip"
@@ -215,253 +204,99 @@ object SaveDirManager {
     // ==================== 用其他应用打开目录 ====================
 
     /**
-     * 构造可打开当前保存目录的候选 Intent，顺序为「自定义目录 → 精确默认目录 → 兜底下载目录」。
+     * 打开当前保存目录（对齐 LocalSend 的方案：隐式 Intent 交系统 resolver）。
      *
-     * 注意：Android 没有「打开任意目录」的官方标准 Intent，且 FileProvider 无法为它自己配置的
-     * 根目录生成 URI（对根目录本身调用 getUriForFile 会抛 StringIndexOutOfBoundsException），
-     * 因此这里统一使用外部存储 SAF 文档 URI。
+     * Android 没有「打开任意目录」的官方标准 Intent，可行路径只有两条：
+     *  - **自定义目录**：本应用持有 SAF 持久授权，把「挂在 tree 授权下的 document URI」
+     *    （裸 tree URI 第三方解析不了，见 §7 #20）以隐式 VIEW Intent 外发并转发读授权，
+     *    候选枚举 / 图标 / 「仅此一次/总是」记住默认全部交给系统「打开方式」——resolver
+     *    在系统侧解析，不受本应用包可见性约束（§7 #18），第三方管理器（MT「定位所在
+     *    位置」等）可正常打开。此前自绘选择列表 + 三套 MIME 探测 + 自记默认的全套机制
+     *    在排障三层后仍有目标静默退出，整体废弃（§7 #21）。
+     *  - **默认目录**：document URI 是合成的、本应用无 SAF 授权可转发（§7 #19），第三方
+     *    必然访问失败，只有特权系统组件 DocumentsUI（「文件」）能开 —— 直接显式调起它，
+     *    不弹一堆必然失败的候选。
      *
-     * 目录 MIME 有三套互不覆盖的注册口径：系统 DocumentsUI 认 `vnd.android.document/directory`，
-     * 而大量 OEM/第三方文件管理器只注册了 `resource/folder`（实测 vivo 自带文件管理不在前者的
-     * 解析结果里），另有部分管理器（如 Total Commander）只注册 `application/x-directory`。
-     * 每个目录都要生成三种 MIME 的候选，缺哪套哪类应用就不出现。
+     * @param forceChooser true（长按）时用系统选择框强制重选；不影响系统里已设的「总是」默认
+     * @return 是否成功调起（false 时调用方应提示用户）
      */
-    private fun buildDirIntents(context: Context): List<Intent> {
-        val intents = mutableListOf<Intent>()
-        val dirMimes = arrayOf(
-            DocumentsContract.Document.MIME_TYPE_DIR, // vnd.android.document/directory
-            "resource/folder",
-            "application/x-directory"
-        )
-        // 优先：用户授权过的自定义目录（SAF tree URI，只支持目录 MIME 这一种形态）
-        getCustomDirUri(context)?.let { treeUri ->
-            intents += Intent(Intent.ACTION_VIEW).apply {
-                // 必须转成「挂在 tree 授权下的 document URI」再外发：裸 tree URI 只有
-                // DocumentsContract 的 tree API 认识，第三方管理器按 document 形态解析
-                // （getDocumentId 要求路径含 /document/ 段）会直接失败并静默退出 ——
-                // startActivity 发射后不管，日志只会记「已调起」看不出对端死活。
-                // buildDocumentUriUsingTree 生成的 URI 内嵌 tree 前缀，授权可随 flag
-                // 转发，document 路径形态才是各管理器（MT「定位所在位置」等）认识的
+    fun openDir(context: Context, forceChooser: Boolean = false): Boolean {
+        val customUri = getCustomDirUri(context)
+        if (customUri != null) {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(
                     DocumentsContract.buildDocumentUriUsingTree(
-                        treeUri, DocumentsContract.getTreeDocumentId(treeUri)
+                        customUri, DocumentsContract.getTreeDocumentId(customUri)
                     ),
                     DocumentsContract.Document.MIME_TYPE_DIR
                 )
+                // 自定义目录有 SAF 持久授权在握，grant flag 转发安全（§7 #19）
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-        }
-        // 默认目录：Download/CrossClip；兜底：下载根目录（个别 ROM 不支持直接定位到子目录）
-        for (documentId in arrayOf("primary:Download/$DEFAULT_SUBDIR", "primary:Download")) {
-            for (mime in dirMimes) {
-                intents += Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(
-                        DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, documentId),
-                        mime
-                    )
-                    // 注意绝不能加 FLAG_GRANT_READ_URI_PERMISSION：grant flag 只能转发
-                    // 调用方自己持有的 URI 访问权，而这些 document URI 是字符串合成的，
-                    // 本应用对它们没有任何 SAF 授权（写 Download 走的是 File API 豁免通道，
-                    // 与 SAF 授权体系无关）——加 flag 会让 startActivity 对所有目标直接抛
-                    // SecurityException（连系统 DocumentsUI 也被误伤）。不加 flag 时只有
-                    // 特权系统组件（DocumentsUI）能打开；第三方管理器要访问目录必须走
-                    // SAF 授权（即下方自定义目录通道，那条候选是带 flag 的）
-                }
+            // createChooser 同样会把 target 的 grant flag 转发给用户选中的目标（API 24+）
+            val toStart = if (forceChooser) {
+                Intent.createChooser(intent, "选择打开保存目录的应用")
+            } else {
+                intent
             }
+            return startDirActivity(context, toStart, "系统「打开方式」")
         }
-        return intents
-    }
 
-    /** OEM 文件管理器的包名/类名特征：命中者排在选择列表最前，避免被网盘、浏览器类噪音淹没 */
-    private val FILE_MANAGER_HINTS = listOf(
-        "filemanager", "fileexplorer", "file_manager", "filebrowser",
-        "documentsui", "myfiles", "esfileexplorer", "filemaster"
-    )
-
-    /** 「打开保存目录」的一个候选应用 */
-    class DirOpener(val label: CharSequence, val icon: Drawable, val component: ComponentName)
-
-    private fun prefs(context: Context) =
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-
-    /** 用户上次在选择列表中选中的默认打开方式（null 表示尚未选择） */
-    fun getPreferredOpener(context: Context): ComponentName? {
-        val saved = prefs(context).getString(KEY_PREF_DIR_OPENER, null) ?: return null
-        val parts = saved.split("/", limit = 2)
-        if (parts.size != 2) return null
-        return ComponentName(parts[0], parts[1])
-    }
-
-    /**
-     * 是否为可免授权打开「合成 document URI」的系统文档组件（DocumentsUI）。
-     * 默认目录（Download/CrossClip）本应用未持有 SAF 授权，只有这类特权组件能打开；
-     * 第三方管理器必然访问失败，调用方可据此向用户提示「改用自定义目录授权」的出路。
-     */
-    fun isPrivilegedDirOpener(component: ComponentName): Boolean =
-        component.packageName.contains("documentsui")
-
-    /** 记住用户选中的默认打开方式 */
-    fun setPreferredOpener(context: Context, component: ComponentName) {
-        prefs(context).edit()
-            .putString(KEY_PREF_DIR_OPENER, "${component.packageName}/${component.className}")
-            .apply()
-    }
-
-    /**
-     * 解析所有「能打开保存目录」的应用。
-     *
-     * 合并**全部**候选 Intent 的解析结果（去重）并按文件管理器特征排序。目录 MIME 有三套
-     * 互不覆盖的注册口径：系统 DocumentsUI 认 `vnd.android.document/directory`，而大量 OEM/
-     * 第三方文件管理器只注册 `resource/folder`（实测 vivo 自带文件管理不在前者的解析结果里），
-     * 还有部分管理器只注册 `application/x-directory` —— 三套都要探测并取并集。
-     * 旧实现「取第一个有结果的 Intent 就返回」会让只认其他口径的应用永远不出现，
-     * 用户在选择列表里只能看到「文件」一个选项。
-     *
-     * 「自定义目录优先」语义不受影响：候选 Intent 仍按自定义目录 → 精确默认目录 → 兜底下载
-     * 目录排序，[launchDirWith] 按同样顺序找到该组件能响应的那一个来调起。
-     */
-    fun resolveDirOpeners(context: Context): List<DirOpener> {
-        val pm = context.packageManager
-        data class Entry(val opener: DirOpener, val isFileManager: Boolean)
-        val seen = HashSet<String>()
-        val entries = mutableListOf<Entry>()
-        for (intent in buildDirIntents(context)) {
-            val resolvers = try {
-                pm.queryIntentActivities(intent, 0)
-            } catch (e: Exception) {
-                emptyList()
-            }
-            for (ri in resolvers) {
-                val pkg = ri.activityInfo.packageName
-                val cls = ri.activityInfo.name
-                if (!seen.add("$pkg/$cls")) continue
-                val lowered = "${pkg.lowercase()}/${cls.lowercase()}"
-                val isFileManager = FILE_MANAGER_HINTS.any { lowered.contains(it) }
-                entries += Entry(
-                    DirOpener(
-                        label = ri.loadLabel(pm),
-                        icon = ri.loadIcon(pm),
-                        component = ComponentName(pkg, cls)
+        // 默认目录：唯一确定能打开的是系统「文件」（DocumentsUI，特权组件），直接调起
+        findDocumentsUi(context)?.let { component ->
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(
+                    DocumentsContract.buildDocumentUri(
+                        EXTERNAL_STORAGE_AUTHORITY, "primary:Download/$DEFAULT_SUBDIR"
                     ),
-                    isFileManager
+                    DocumentsContract.Document.MIME_TYPE_DIR
                 )
+                setComponent(component)
             }
+            return startDirActivity(context, intent, "系统「文件」(${component.packageName})")
         }
-        return entries.sortedByDescending { it.isFileManager }.map { it.opener }
+        // 极少数精简 ROM 没有 DocumentsUI：退回隐式调起，能开就开
+        DebugLogger.log(TAG, "未找到系统文档组件（DocumentsUI），隐式调起默认目录")
+        val fallback = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(
+                DocumentsContract.buildDocumentUri(
+                    EXTERNAL_STORAGE_AUTHORITY, "primary:Download/$DEFAULT_SUBDIR"
+                ),
+                DocumentsContract.Document.MIME_TYPE_DIR
+            )
+        }
+        return startDirActivity(context, fallback, "隐式")
     }
 
-    /**
-     * 用指定应用打开当前保存目录。
-     *
-     * 会遍历候选 Intent 找到该组件能响应的那一个（不同应用注册的 MIME 口径不同），逐个尝试
-     * 直到调起成功。
-     *
-     * @return 是否成功调起
-     */
-    fun launchDirWith(context: Context, component: ComponentName): Boolean {
-        for (intent in buildDirIntents(context)) {
-            val resolvers = try {
-                pm(context)?.queryIntentActivities(intent, 0)
-            } catch (e: Exception) {
-                null
-            }
-            val matches = resolvers?.any {
-                it.activityInfo.packageName == component.packageName &&
-                    it.activityInfo.name == component.className
-            } == true
-            if (!matches) continue
-            try {
-                val target = Intent(intent).setComponent(component)
-                if (context !is Activity) {
-                    target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                try {
-                    context.startActivity(target)
-                } catch (se: SecurityException) {
-                    // 个别 ROM 对 grant flag 的发送方校验更激进：即使我们持有持久授权也可能
-                    // 误判，剥掉授权标志兜底重试一次（系统 DocumentsUI 本就不需要 flag）
-                    if (target.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION == 0) throw se
-                    target.flags = target.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION.inv()
-                    context.startActivity(target)
-                    DebugLogger.log(TAG, "去除 URI 授权标志后重试调起成功 (${component.packageName})")
-                }
-                DebugLogger.log(TAG, "已用 ${component.packageName} 打开保存目录: ${getDisplayPath(context)}")
-                return true
-            } catch (e: Exception) {
-                DebugLogger.log(TAG, "用 ${component.packageName} 打开目录失败: ${e.message}")
-            }
+    /** 查询系统文档组件（DocumentsUI，包名含 documentsui）中能开目录的那个 Activity */
+    private fun findDocumentsUi(context: Context): ComponentName? {
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(
+                DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_AUTHORITY, "primary:Download"),
+                DocumentsContract.Document.MIME_TYPE_DIR
+            )
         }
-        return false
+        val resolvers = try {
+            context.packageManager.queryIntentActivities(intent, 0)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        return resolvers.firstOrNull { it.activityInfo.packageName.contains("documentsui") }
+            ?.let { ComponentName(it.activityInfo.packageName, it.activityInfo.name) }
     }
 
-    private fun pm(context: Context) = context.packageManager
-
-    /**
-     * 「打开保存目录」的统一入口。
-     *
-     * 优先用用户记住的默认应用直接打开（成功后回调 [onOpened]）；没有默认应用、默认应用已
-     * 卸载/失效，或 [forceChooser] 为 true（长按重新选择）时，回调 [onNeedChoose] 交给调用方
-     * 弹出选择列表 —— 系统 chooser 拿不到「用户选了哪个」，无法记住默认应用，所以选择列表
-     * 必须用应用内对话框实现；用户选中后调 [setPreferredOpener] + [launchDirWith] 完成闭环。
-     *
-     * @return false 表示没有任何应用可处理（调用方需提示用户）；true 表示已直接打开或已回调
-     */
-    fun openDir(
-        context: Context,
-        forceChooser: Boolean = false,
-        onOpened: () -> Unit = {},
-        onNeedChoose: (List<DirOpener>) -> Unit
-    ): Boolean {
-        val openers = resolveDirOpeners(context)
-        if (openers.isEmpty()) {
-            DebugLogger.log(TAG, "没有可打开保存目录的应用（候选目录均无法调起）")
-            return false
-        }
-
-        val preferred = getPreferredOpener(context)
-        if (!forceChooser && preferred != null) {
-            val stillValid = openers.any { it.component == preferred }
-            if (stillValid && launchDirWith(context, preferred)) {
-                onOpened()
-                return true
+    private fun startDirActivity(context: Context, intent: Intent, via: String): Boolean {
+        return try {
+            if (context !is Activity) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            DebugLogger.log(TAG, "默认打开方式已失效: $preferred，改为弹出选择列表")
+            context.startActivity(intent)
+            DebugLogger.log(TAG, "已发起打开保存目录 ($via): ${getDisplayPath(context)}")
+            true
+        } catch (e: Exception) {
+            DebugLogger.log(TAG, "打开保存目录失败 ($via): ${e.message}")
+            false
         }
-        onNeedChoose(openers)
-        return true
-    }
-
-    /**
-     * 弹出「选择打开保存目录的应用」对话框（图标 + 应用名的列表）。
-     *
-     * 用应用内对话框而不是系统 chooser 的原因见 [openDir]：需要捕获用户的选择以记住默认应用。
-     * setItems 只支持纯文本，图标需要自定义行布局（item_dir_opener）。
-     */
-    fun showOpenerPickerDialog(
-        activity: Activity,
-        openers: List<DirOpener>,
-        onPicked: (DirOpener) -> Unit,
-        onDismiss: () -> Unit = {}
-    ) {
-        val adapter = object : ArrayAdapter<DirOpener>(activity, R.layout.item_dir_opener, openers) {
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val view = convertView
-                    ?: LayoutInflater.from(context).inflate(R.layout.item_dir_opener, parent, false)
-                val opener = getItem(position)!!
-                view.findViewById<ImageView>(R.id.iv_opener_icon).setImageDrawable(opener.icon)
-                view.findViewById<TextView>(R.id.tv_opener_label).text = opener.label
-                return view
-            }
-        }
-        val dialog = AlertDialog.Builder(activity)
-            .setTitle("选择打开保存目录的应用")
-            .setAdapter(adapter) { _, which ->
-                onPicked(openers[which])
-            }
-            .setNegativeButton("取消", null)
-            .show()
-        // 选中与取消都会触发 dismiss：调用方（如透明跳板 Activity）借此完成自身收尾
-        dialog.setOnDismissListener { onDismiss() }
     }
 
     // ==================== 内部工具函数 ====================

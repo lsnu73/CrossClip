@@ -401,8 +401,8 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 - `ShellExecuteW(NULL, "open", <目录>, …)`: 走注册表 `Directory` 类注册的默认处理程序,
   第三方管理器接管时正确拉起第三方; 代价是**无法预选中文件本身**。
 
-**选择**: 尊重默认管理器。与 Android 端「打开保存目录」让用户自选并记住默认应用
-(§7 #18)语义一致 —— **用户设定的默认打开方式优先于任何便利性**。
+**选择**: 尊重默认管理器。与 Android 端「打开保存目录」交系统「打开方式」
+并由其「总是」记住默认(§7 #21)语义一致 —— **用户设定的默认打开方式优先于任何便利性**。
 
 **边界**(都在 `progress_window.rs`, 改动时不要破坏):
 - 只有「接收成功」的终态浮窗可点击(`OPEN_PATH` 有值); 进行中 / 失败 / 发送侧浮窗
@@ -591,6 +591,7 @@ hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
 | 18 | Android「打开保存目录」选择列表只有一个「文件」可选, 装了的其他文件管理器不出现 | 两层根因叠加: ① `resolveDirOpeners` 取**第一个有解析结果的 Intent** 就返回, 而目录 Intent 有三套互不覆盖的 MIME 注册口径(系统 DocumentsUI 认 `vnd.android.document/directory`, 多数 OEM/第三方管理器只注册 `resource/folder`, 部分如 Total Commander 只注册 `application/x-directory`), 第一套有结果时其余口径的应用全被吞掉; ② Android 11+(targetSdk 30+)包可见性 —— Manifest 没有 `<queries>` 时 `queryIntentActivities` 在查询阶段就把非默认可见的应用过滤掉, 只剩核心系统组件 DocumentsUI, ①修好后此层仍会架空并集逻辑(tag 2.2.1 才补) | ① 合并**全部**候选 Intent 的解析结果并按 `包名/类名` 去重, 三种 MIME 口径全部探测 —— **多口径解析必须取并集, 不能「first-non-empty-wins」**; ② Manifest 用 `<queries>` 声明三套 `VIEW + content + 目录MIME`, 与 `buildDirIntents` 的探测口径一一对应。教训: **凡靠 queryIntentActivities 做解析的功能, targetSdk 30+ 必须同步审 `<queries>`** |
 | 19 | 选择列表里选了第三方管理器(如 MT「定位所在位置」), 日志显示「已调起」但手机毫无反应; 给候选补上 grant flag 后更严重: `startActivity` 直接抛 `SecurityException: UID does not have permission to content://...`, 连系统「文件」都打不开 | 默认目录的 document URI 是 `buildDocumentUri` **字符串合成**的, 本应用对它没有 SAF 授权(写 `Download/CrossClip` 走 Android 11 的 File API 豁免通道, 与 SAF URI 授权体系**完全无关**)。而 `FLAG_GRANT_READ_URI_PERMISSION` 只能**转发调用方自己持有**的访问权: 不带 flag → 第三方应用拿到 URI 无权读、静默退出(特权组件 DocumentsUI 不受限, 所以只有它能开); 带 flag → 系统做发送方校验, 我们不持有授权 → 对所有目标抛 SecurityException(与目标是谁无关) | 默认目录候选**不带** flag(只能指望特权系统组件); 自定义目录(SAF `takePersistableUriPermission` 已持有授权)候选**必须带** flag, 第三方管理器因此可正常打开; `launchDirWith` 对 SecurityException 再兜一层「剥 flag 重试」防 ROM 校验差异。第三方要访问默认目录的正规出路: 引导用户把保存目录设为「自定义目录」并选同一文件夹(SAF 授权), 文件落点不变。教训: **grant flag 不是万金油 —— 自己没授权的 URI, 加 flag 反而把能用的路径也炸掉;「调起成功」≠「打开成功」** |
 | 20 | 按引导把 Download/CrossClip 设为自定义目录(SAF 授权)后, 第三方管理器**仍然**打不开: 发送方校验已通过(startActivity 不再抛异常), 日志「已调起」但对端依旧静默退出 | 自定义目录候选外发的是**裸 tree URI**(`.../tree/primary:Download/CrossClip`, SAF 目录授权的原生形态): tree URI 只有 DocumentsContract 的 tree API 认识, 第三方管理器按 document 形态解析(`getDocumentId` 要求路径含 `/document/` 段)直接抛异常退出; 发送方持有授权所以不炸我们这边, 日志全程绿灯 | 外发前用 `buildDocumentUriUsingTree(treeUri, getTreeDocumentId(treeUri))` 转成**内嵌 tree 前缀的 document URI**(即 `saveToCustomDir` 写文件已在用的形态), 授权照常随 flag 转发, document 路径才是各管理器认识的样子。教训: **tree URI 只在自己进程内用; 出进程必须转成 document URI** |
+| 21 | 自绘「打开保存目录」选择列表(三 MIME 并集 + 图标列表 + 自记默认应用)在 #18/#19/#20 三层逐个排障后, 第三方管理器对显式组件调起仍可能静默退出; 对照 LocalSend(实测其「打开目录」弹完整系统列表且第三方可开)发现差异只在「显式 vs 隐式」 | LocalSend 的实现(`FileOpener.openUri`): 只发**隐式** VIEW Intent(document URI + 目录 MIME + grant flag), 候选枚举/图标/记住默认全部交给系统 resolver —— resolver 在系统侧解析, 不受本应用包可见性约束, 「仅此一次/总是」原生支持; 显式 setComponent 调起则把解析责任留在对端, 对端解析失败我们无感知 | 对齐 LocalSend: 自定义目录 → 隐式 Intent 交系统「打开方式」(长按用 `createChooser` 强制重选, grant 照常转发); 默认目录 → 直接显式调起 DocumentsUI(唯一特权可开者); 整体删除自绘选择器/三 MIME 探测/自记默认全套机制。教训: **能在系统层解决的事(选应用/记默认)不要在应用层重造; 排障排到第三层仍不通, 优先怀疑方案本身而非继续打补丁** |
 
 ---
 
@@ -633,8 +634,9 @@ cd android && ./gradlew assembleRelease
 - [ ] 自定义保存目录后重启 App 仍能写入;
 - [ ] 手机向电脑发文件, 完成后点击右下角浮窗能打开文件所在目录; 「文件夹打开方式」被
   第三方管理器(Total Commander 等)接管时应拉起第三方而非 explorer(§3.15);
-- [ ] Android 长按保存目录路径弹出的选择列表包含设备上所有能开目录的应用
-  (装了多个文件管理器时逐个可见, §7 #18)。
+- [ ] Android 点击保存目录路径弹系统「打开方式」(自定义目录场景, 含仅此一次/总是),
+  第三方管理器(MT 等)可选且能真正打开并定位; 长按路径强制重弹选择框;
+  默认目录场景直接调起系统「文件」(§7 #18-#21)。
 
 ### 8.4 版本与发布约定
 

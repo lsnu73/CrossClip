@@ -303,12 +303,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
         tvSaveDirPath.setOnClickListener {
-            // 单击：用默认应用直接打开（首次点击会先弹选择器，选中即设为默认）
-            openSaveDirWithOtherApps(forceChooser = false)
+            // 单击：系统「打开方式」直接打开（未设默认时弹 仅此一次/总是）
+            openSaveDir(forceChooser = false)
         }
         tvSaveDirPath.setOnLongClickListener {
-            // 长按：重新选择打开方式，选中的应用成为新的默认
-            openSaveDirWithOtherApps(forceChooser = true)
+            // 长按：强制重弹系统「打开方式」重新选择
+            openSaveDir(forceChooser = true)
             true
         }
         tvResetSaveDir.setOnClickListener {
@@ -613,38 +613,12 @@ class MainActivity : AppCompatActivity() {
     // ==================== 路径点击：用其他应用打开 ====================
 
     /**
-     * 点击保存目录路径：用默认应用直接打开；长按（[forceChooser]=true）重新弹选择列表，
-     * 选中的应用会被记住为默认，之后单击直接打开。
+     * 点击/长按保存目录路径（对齐 LocalSend 的方案，详见 [SaveDirManager.openDir]）：
+     * 自定义目录发隐式 VIEW Intent，交系统「打开方式」选应用（仅此一次/总是），
+     * 长按 forceChooser=true 强制重弹系统选择框；默认目录只有系统「文件」能打开，直接调起。
      */
-    private fun openSaveDirWithOtherApps(forceChooser: Boolean) {
-        val handled = SaveDirManager.openDir(this, forceChooser,
-            onOpened = { },
-            onNeedChoose = { openers ->
-                SaveDirManager.showOpenerPickerDialog(
-                    this,
-                    openers,
-                    onPicked = { picked ->
-                        SaveDirManager.setPreferredOpener(this, picked.component)
-                        if (SaveDirManager.launchDirWith(this, picked.component)) {
-                            // 默认目录本应用未持有 SAF 授权，第三方管理器拿到 URI 也读不了，
-                            // 会表现为「调起成功但毫无反应」——提前告诉用户正规出路：
-                            // 自定义目录（SAF 授权）选同一个文件夹即可用它打开，文件落点不变
-                            val needsSafHint = !SaveDirManager.hasCustomDir(this) &&
-                                !SaveDirManager.isPrivilegedDirOpener(picked.component)
-                            val msg = if (needsSafHint) {
-                                "已记住「${picked.label}」。注意：第三方管理器无权访问默认目录，若打开无反应，请把保存目录改为「自定义目录」并选择同一文件夹授权"
-                            } else {
-                                "已记住「${picked.label}」为默认打开方式，长按路径可重新选择"
-                            }
-                            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-                        } else {
-                            Toast.makeText(this, "打开保存目录失败", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                )
-            }
-        )
-        if (!handled) {
+    private fun openSaveDir(forceChooser: Boolean) {
+        if (!SaveDirManager.openDir(this, forceChooser)) {
             Toast.makeText(this, "没有可打开该目录的应用，请手动前往该目录", Toast.LENGTH_LONG).show()
         }
     }

@@ -28,28 +28,15 @@
         android:maxSdkVersion="32" />
 
     <!-- Android 11+ 包可见性：queryIntentActivities 只能看到此处声明匹配的应用。
-         不声明的话，「打开保存目录」的候选解析会被系统在查询阶段裁剪，只剩默认可见的
-         系统 DocumentsUI（现象：选择列表只有「文件」一个选项，OEM/第三方文件管理器
-         即使注册了目录 filter 也不出现）。三套 MIME 口径与 SaveDirManager.buildDirIntents
-         的探测一一对应，缺一不可；各管理器注册的目录 MIME 互不覆盖，见 SaveDirManager 注释。 -->
+         SaveDirManager.findDocumentsUi 需要按「VIEW + content + 目录 MIME」查询系统
+         文档组件（DocumentsUI），不声明的话查询结果在系统侧被裁剪、永远为空。
+         用户可见的「打开方式」候选枚举发生在系统 resolver，不受此声明影响。 -->
     <queries>
         <intent>
             <action android:name="android.intent.action.VIEW" />
             <data
                 android:scheme="content"
                 android:mimeType="vnd.android.document/directory" />
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.VIEW" />
-            <data
-                android:scheme="content"
-                android:mimeType="resource/folder" />
-        </intent>
-        <intent>
-            <action android:name="android.intent.action.VIEW" />
-            <data
-                android:scheme="content"
-                android:mimeType="application/x-directory" />
         </intent>
     </queries>
 
