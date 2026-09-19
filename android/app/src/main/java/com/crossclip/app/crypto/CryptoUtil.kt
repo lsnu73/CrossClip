@@ -1,6 +1,7 @@
 package com.crossclip.app.crypto
 
 import android.util.Base64
+import java.io.InputStream
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -117,14 +118,22 @@ object CryptoUtil {
      * 因此可以安全地对 GB 级大文件求哈希，避免 OOM。
      */
     fun computeHashFile(file: java.io.File): String {
+        return file.inputStream().use { computeHashStream(it) }
+    }
+
+    /**
+     * 流式计算任意输入流的 SHA-256 哈希（不关闭传入的流，由调用方负责）。
+     *
+     * SAF 自定义目录里的文件只能通过 `ContentResolver.openInputStream` 读取，
+     * 接收端去重比对这类文件的内容时走这个入口。
+     */
+    fun computeHashStream(input: InputStream): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
-            }
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read <= 0) break
+            digest.update(buffer, 0, read)
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }

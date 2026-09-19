@@ -107,7 +107,10 @@ object FileReceiver {
     /**
      * 在目标保存目录里查找「同名 + 同大小 + 同哈希」的既有文件。
      *
-     * 先比大小（读元数据，几乎零成本），只有大小一致才值得付出一次哈希。
+     * 默认目录与 SAF 自定义目录共用同一套低成本模型（ai-handover §7 #23）：
+     * 先按「精确同名」定位**单个**候选（File 一次 stat / SAF 一次 children 查询，
+     * 与落盘时的重名规避同量级），大小相等才对其内容流式算一次 SHA-256 ——
+     * 从不遍历目录逐个读取。
      *
      * @return 命中则返回该文件的展示路径，否则 null
      */
@@ -119,17 +122,30 @@ object FileReceiver {
     ): String? {
         if (expectedHash.isNullOrEmpty()) return null
         return try {
-            // 只在默认目录（Download/CrossClip）里做去重：用户若改用 SAF 自定义目录，
-            // 列举子项并逐个读取的代价明显更高、收益不成正比，那里直接放弃去重。
-            if (SaveDirManager.hasCustomDir(context)) return null
-
             // 文件名来自对端，必须先安全化再拼路径 —— 否则 `../` 之类可以逃出保存目录。
             // 规则必须与 SaveDirManager 落盘时用的一致，否则永远命不中同一个文件。
-            val candidate = File(SaveDirManager.getDefaultDir(), sanitizeFilename(filename))
-            if (!candidate.isFile || candidate.length() != expectedSize) return null
+            val safeName = sanitizeFilename(filename)
 
-            val actualHash = com.crossclip.app.crypto.CryptoUtil.computeHashFile(candidate)
-            if (actualHash.equals(expectedHash, ignoreCase = true)) candidate.absolutePath else null
+            if (!SaveDirManager.hasCustomDir(context)) {
+                // 默认目录（Download/CrossClip）：File API 直接比对
+                val candidate = File(SaveDirManager.getDefaultDir(), safeName)
+                if (!candidate.isFile || candidate.length() != expectedSize) return null
+
+                val actualHash = com.crossclip.app.crypto.CryptoUtil.computeHashFile(candidate)
+                if (actualHash.equals(expectedHash, ignoreCase = true)) candidate.absolutePath else null
+            } else {
+                // 自定义目录（SAF）：同名候选只有 document URI 可达，打开输入流比对内容
+                val (docUri, size) = SaveDirManager.findCustomDirChild(context, safeName)
+                    ?: return null
+                if (size != expectedSize) return null
+
+                val actualHash = context.contentResolver.openInputStream(docUri)?.use { input ->
+                    com.crossclip.app.crypto.CryptoUtil.computeHashStream(input)
+                } ?: return null
+                if (actualHash.equals(expectedHash, ignoreCase = true)) {
+                    "${SaveDirManager.getCustomDirLabel(context)}/$safeName"
+                } else null
+            }
         } catch (e: Exception) {
             DebugLogger.log(TAG, "去重预检失败(按未命中处理): ${e.message}")
             null

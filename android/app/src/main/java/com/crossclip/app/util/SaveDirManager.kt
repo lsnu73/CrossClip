@@ -100,6 +100,52 @@ object SaveDirManager {
         DebugLogger.log(TAG, "已恢复默认保存目录: ${getDefaultDir().absolutePath}")
     }
 
+    /** 自定义目录的展示标签（供拼接「标签/文件名」展示路径）；未设置自定义目录时返回 null */
+    fun getCustomDirLabel(context: Context): String? {
+        if (getCustomDirUri(context) == null) return null
+        return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_CUSTOM_DIR_LABEL, null) ?: "自定义目录"
+    }
+
+    /**
+     * 在自定义保存目录里按「精确同名」查找子文件。
+     *
+     * 供接收端去重预检使用：一次 children 查询同时取回显示名、大小与文档 ID，
+     * 命中后调用方可凭返回的 document URI 打开输入流比对内容哈希。
+     * 与默认目录的 `File(name)` 定位同构 —— 只定位单个候选，不遍历读取目录内容。
+     *
+     * @return Pair(documentUri, sizeBytes)；未设置自定义目录或未找到同名子项时返回 null
+     */
+    fun findCustomDirChild(context: Context, name: String): Pair<Uri, Long>? {
+        val treeUri = getCustomDirUri(context) ?: return null
+        return try {
+            val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeDocId)
+            context.contentResolver.query(
+                childrenUri,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_SIZE,
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID
+                ),
+                null, null, null
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    if (cursor.getString(0) == name) {
+                        val docUri = DocumentsContract.buildDocumentUriUsingTree(
+                            treeUri, cursor.getString(2)
+                        )
+                        return docUri to cursor.getLong(1)
+                    }
+                }
+                null
+            }
+        } catch (e: Exception) {
+            DebugLogger.log(TAG, "查询自定义目录子项失败(按未找到处理): ${e.message}")
+            null
+        }
+    }
+
     /**
      * 获取当前保存目录的展示文本（用于 UI 显示）。
      * 默认模式展示人类可读的绝对路径；自定义模式展示目录名 + 授权来源。
