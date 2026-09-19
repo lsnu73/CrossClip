@@ -160,7 +160,7 @@ fn open_saved_dir() {
         None => return,
     };
     let dir_str = dir.to_string_lossy().to_string();
-    let verb = to_wide("open");
+    let _verb = to_wide("open");
     let dir_wide = to_wide(&dir_str);
     unsafe {
         let result = ShellExecuteW(
@@ -174,7 +174,7 @@ fn open_saved_dir() {
         // 返回值 ≤ 32 表示失败（句柄 > 32 才是成功）；失败时仅打日志即可，
         // 浮窗本身是尽力而为的辅助功能，不能反过来打扰传输主流程
         if result as isize <= 32 {
-            println!("[ProgressWindow] 打开保存目录失败: {}", dir_str);
+            log_warn!("ProgressWindow", "打开保存目录失败: {}", dir_str);
         }
     }
 }

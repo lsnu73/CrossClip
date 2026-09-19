@@ -172,7 +172,14 @@ impl Broadcaster {
         broadcaster
     }
 
-    pub fn register_peer(&self, ip: String, port: u16, device_id: String, device_name: String, device_brand: String) {
+    pub fn register_peer(
+        &self,
+        ip: String,
+        port: u16,
+        device_id: String,
+        device_name: String,
+        device_brand: String,
+    ) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -271,7 +278,7 @@ impl Broadcaster {
         let before = peers.len();
         peers.retain(|p| p.ip != ip);
         if peers.len() != before {
-            println!("[Server] 已摘除对等节点: {}", ip);
+            log_info!("Server", "已摘除对等节点: {}", ip);
         }
     }
 }
@@ -452,20 +459,26 @@ pub fn send_file_to_phone(
     let skipped_existing = prepare_response.contains("\"already_exists\":true");
 
     if skipped_existing {
-        println!(
-            "[FileTransfer] 手机端已存在相同文件，跳过全部分块: {}",
+        log_info!(
+            "FileTransfer",
+            "手机端已存在相同文件，跳过全部分块: {}",
             transfer.filename
         );
     } else {
         // ---------- 2. 逐块发送（复用同一连接） ----------
         for idx in 0..transfer.total_chunks {
-            let encrypted =
-                file_manager.get_chunk_encrypted_bytes(&transfer.file_id, idx, pin)?;
+            let encrypted = file_manager.get_chunk_encrypted_bytes(&transfer.file_id, idx, pin)?;
             let path = format!(
                 "/file/chunk?file_id={}&index={}&total={}",
                 transfer.file_id, idx, transfer.total_chunks
             );
-            write_http_request(&mut writer, &host, &path, "application/octet-stream", &encrypted)?;
+            write_http_request(
+                &mut writer,
+                &host,
+                &path,
+                "application/octet-stream",
+                &encrypted,
+            )?;
             let (chunk_status, chunk_body) = read_http_response(&mut reader)?;
             // 手机端拒绝某个分块（如解密失败/磁盘写满）时绝不能装作没事继续发：
             // 旧实现把响应整个丢掉，即使手机端一路 500 也照样报「发送完成」，
@@ -530,7 +543,7 @@ pub fn start_http_server(
         let server = match Server::http(&addr) {
             Ok(s) => Arc::new(s),
             Err(e) => {
-                eprintln!("[HTTP] 无法绑定端口 {}: {}", port, e);
+                log_err!("HTTP", "无法绑定端口 {}: {}", port, e);
                 return;
             }
         };
@@ -703,7 +716,13 @@ fn handle_client_request(
 
         // clone 而非 move：这个连接结束时还要用同一个 IP 把自己从 peers 里摘掉
         // 此时手机端身份尚未上报，先占位注册，真实名称/品牌由 /auth 与 /heartbeat 刷新
-        broadcaster.register_peer(client_ip.clone(), 18237, "android_phone".to_string(), "安卓手机".to_string(), String::new());
+        broadcaster.register_peer(
+            client_ip.clone(),
+            18237,
+            "android_phone".to_string(),
+            "安卓手机".to_string(),
+            String::new(),
+        );
 
         let (tx, rx) = channel::<String>();
         {
@@ -758,7 +777,9 @@ fn handle_client_request(
 
                 if let Some(cipher) = req.auth_cipher {
                     if let Ok(decrypted) = crate::crypto::decrypt(&cipher, &current_pin) {
-                        if let Ok(payload) = serde_json::from_str::<AuthChallengePayload>(&decrypted) {
+                        if let Ok(payload) =
+                            serde_json::from_str::<AuthChallengePayload>(&decrypted)
+                        {
                             let time_diff = now_ms.abs_diff(payload.timestamp);
                             if time_diff < 60_000 {
                                 is_valid = true;
@@ -854,7 +875,13 @@ fn handle_client_request(
                         None => true,
                     };
                     if hash_ok && !decrypted.trim().is_empty() {
-                        broadcaster.register_peer(client_ip, 18237, "android_phone".to_string(), "安卓手机".to_string(), String::new());
+                        broadcaster.register_peer(
+                            client_ip,
+                            18237,
+                            "android_phone".to_string(),
+                            "安卓手机".to_string(),
+                            String::new(),
+                        );
 
                         // hub 统一分配单调时钟：到达序即用户意图序；登记先行于写入，
                         // 随后的本地剪贴板变化事件命中记录被跳过（防回环）
@@ -951,8 +978,14 @@ fn handle_client_request(
         // 二进制协议：分块密文直接作为请求体（省去 Base64/JSON 开销），元数据走 query 参数
         let params = parse_query_params(&url);
         let file_id = params.get("file_id").cloned().unwrap_or_default();
-        let chunk_index = params.get("index").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-        let total_chunks = params.get("total").and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        let chunk_index = params
+            .get("index")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+        let total_chunks = params
+            .get("total")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
 
         if file_id.is_empty() {
             let resp = Response::from_string(r#"{"status":"error","message":"missing_file_id"}"#)
@@ -975,7 +1008,8 @@ fn handle_client_request(
         }
 
         let current_pin = pin_code.read().unwrap().clone();
-        match file_manager.handle_chunk(&file_id, chunk_index, total_chunks, &payload, &current_pin) {
+        match file_manager.handle_chunk(&file_id, chunk_index, total_chunks, &payload, &current_pin)
+        {
             Ok((received, total)) => {
                 // 通过 SSE 广播接收进度给所有长连接客户端
                 let progress_event = serde_json::json!({
@@ -1024,7 +1058,8 @@ fn handle_client_request(
     if path == "/file/complete" && method == Method::Post {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_ok() {
-            if let Ok(complete) = serde_json::from_str::<crate::file_transfer::FileComplete>(&body) {
+            if let Ok(complete) = serde_json::from_str::<crate::file_transfer::FileComplete>(&body)
+            {
                 let current_pin = pin_code.read().unwrap().clone();
                 match file_manager.handle_complete(&complete, &current_pin) {
                     Ok((final_path, deduplicated)) => {

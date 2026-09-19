@@ -24,7 +24,7 @@ pub fn start_udp_discovery_responder(
         let socket = match UdpSocket::bind("0.0.0.0:18234") {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[UDP] 无法绑定发现端口 18234: {}", e);
+                log_err!("UDP", "无法绑定发现端口 18234: {}", e);
                 return;
             }
         };

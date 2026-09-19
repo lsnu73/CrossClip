@@ -6,6 +6,8 @@
 //! 托盘窗口生命周期、单实例 + WM_COPYDATA 转发、资源管理器右键菜单注册
 //! 等设计背后的原因与改动禁区。
 
+#[macro_use]
+mod logger;
 mod clipboard;
 mod config;
 mod crypto;
@@ -26,7 +28,6 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::Threading::*;
-use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -48,7 +49,7 @@ const ID_TRAY_REGEN_PIN: usize = 1004;
 const ID_TRAY_TOGGLE_AUTO: usize = 1005;
 const ID_TRAY_AUTO_START: usize = 1006;
 const ID_TRAY_SEND_MANUAL: usize = 1007;
-const ID_TRAY_SEND_FILE: usize = 1009;
+const ID_TRAY_OPEN_LOG: usize = 1009;
 const ID_TRAY_PHONE: usize = 1010;
 const ID_TRAY_QUIT: usize = 1008;
 
@@ -89,6 +90,7 @@ impl AppState {
         }
         // 同步持久化写入 config.json
         config::update_persisted_pin(&new_pin);
+        log_info!("PIN", "已重新生成随机 PIN 码");
         // 断开旧客户端长连接，强制手机端使用新 PIN 重新握手
         self.broadcaster.disconnect_all();
         update_tray_tooltip(
@@ -106,15 +108,27 @@ impl AppState {
         let current = self.auto_sync.load(Ordering::SeqCst);
         let new_val = !current;
         self.auto_sync.store(new_val, Ordering::SeqCst);
+        log_info!(
+            "AUTO_SYNC",
+            "自动互传模式切换为: {}",
+            if new_val { "开启" } else { "关闭" }
+        );
         config::update_persisted_auto_sync(new_val);
         let pin = self.pin_code.read().unwrap().clone();
-        update_tray_tooltip(self.hwnd as HWND, &pin, &self.main_ip, self.http_port, new_val);
+        update_tray_tooltip(
+            self.hwnd as HWND,
+            &pin,
+            &self.main_ip,
+            self.http_port,
+            new_val,
+        );
         new_val
     }
 
     pub fn send_manual(&self) {
         if let Some(txt) = crate::clipboard::get_clipboard_text() {
             if !txt.trim().is_empty() {
+                log_info!("CLIP_SEND", "手动发送当前剪贴板到手机，长度: {}", txt.len());
                 // 手动发送是用户显式意图：绕过去重判定，直接分配新时钟推送
                 let clock = crate::clipboard::begin_local_manual_push(&txt);
                 self.broadcaster.broadcast_text(&txt, clock);
@@ -122,18 +136,10 @@ impl AppState {
         }
     }
 
-    /// 托盘菜单入口：弹出文件选择器，选择后发送到手机
-    pub fn send_file_to_phone(&self) {
-        let file_path = match open_file_picker(self.hwnd as HWND) {
-            Some(p) => p,
-            None => return,
-        };
-        self.send_file_path(&file_path);
-    }
-
     /// 发送指定路径的文件到手机。
-    /// 资源管理器右键菜单（`--send-file` 参数）与托盘菜单共用此入口。
+    /// 资源管理器右键菜单（`--send-file` 参数）共用此入口。
     pub fn send_file_path(&self, path: &str) {
+        log_info!("FILE_SEND", "开始发送文件到手机: {}", path);
         let file_path = path.to_string();
         let file_manager = self.file_manager.clone();
         let broadcaster = self.broadcaster.clone();
@@ -177,7 +183,10 @@ impl AppState {
             // 3. 通过**单条复用连接**发送整个文件（prepare → 分块×N → complete）
             let sender_id = {
                 let state = GLOBAL_STATE.lock().unwrap();
-                state.as_ref().map(|s| s.device_id.clone()).unwrap_or_default()
+                state
+                    .as_ref()
+                    .map(|s| s.device_id.clone())
+                    .unwrap_or_default()
             };
 
             progress_window::show_progress("正在发送文件到手机", &filename, file_size);
@@ -207,6 +216,12 @@ impl AppState {
 
             match send_result {
                 Ok(server::SendOutcome::Sent) => {
+                    log_ok!(
+                        "FILE_SEND",
+                        "文件发送完成: {} ({})",
+                        filename,
+                        progress_window::format_size(file_size)
+                    );
                     progress_window::finish(
                         "文件发送完成",
                         &format!(
@@ -218,6 +233,11 @@ impl AppState {
                     );
                 }
                 Ok(server::SendOutcome::SkippedExisting) => {
+                    log_ok!(
+                        "FILE_SEND",
+                        "手机端已存在该文件，跳过重复传输: {}",
+                        filename
+                    );
                     progress_window::finish(
                         "已跳过：手机端已有该文件",
                         &format!("{} 内容一致，未重复传输", filename),
@@ -225,6 +245,7 @@ impl AppState {
                     );
                 }
                 Err(e) => {
+                    log_err!("FILE_SEND", "文件发送失败: {} - {}", filename, e);
                     progress_window::finish("文件发送失败", &e, false);
                 }
             }
@@ -233,7 +254,10 @@ impl AppState {
             let pin = pin_code.read().unwrap().clone();
             let main_ip = {
                 let state = GLOBAL_STATE.lock().unwrap();
-                state.as_ref().map(|s| s.main_ip.clone()).unwrap_or_else(|| "127.0.0.1".to_string())
+                state
+                    .as_ref()
+                    .map(|s| s.main_ip.clone())
+                    .unwrap_or_else(|| "127.0.0.1".to_string())
             };
             let port = {
                 let state = GLOBAL_STATE.lock().unwrap();
@@ -241,7 +265,10 @@ impl AppState {
             };
             let auto = {
                 let state = GLOBAL_STATE.lock().unwrap();
-                state.as_ref().map(|s| s.auto_sync.load(Ordering::SeqCst)).unwrap_or(true)
+                state
+                    .as_ref()
+                    .map(|s| s.auto_sync.load(Ordering::SeqCst))
+                    .unwrap_or(true)
             };
             update_tray_tooltip(hwnd_isize as HWND, &pin, &main_ip, port, auto);
 
@@ -397,36 +424,6 @@ fn forward_file_to_existing_instance() -> bool {
     }
 }
 
-/// 打开 Windows 原生文件选择对话框
-fn open_file_picker(hwnd: HWND) -> Option<String> {
-    unsafe {
-        let mut filename_buf = [0u16; 32768]; // 支持长路径
-        let filter = to_wide("所有文件\0*.*\0图片文件\0*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.webp\0文档\0*.txt;*.doc;*.docx;*.pdf\0视频\0*.mp4;*.avi;*.mkv;*.mov\0音频\0*.mp3;*.wav;*.flac;*.aac\0");
-        let title = to_wide("选择要发送到手机的文件");
-
-        let mut ofn: OPENFILENAMEW = std::mem::zeroed();
-        ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-        ofn.hwndOwner = hwnd;
-        ofn.lpstrFilter = filter.as_ptr();
-        ofn.lpstrFile = filename_buf.as_mut_ptr();
-        ofn.nMaxFile = 32768;
-        ofn.lpstrTitle = title.as_ptr();
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-
-        if GetOpenFileNameW(&mut ofn) != 0 {
-            let len = filename_buf.iter().position(|&c| c == 0).unwrap_or(0);
-            let path = String::from_utf16_lossy(&filename_buf[..len]);
-            if !path.is_empty() {
-                Some(path)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-}
-
 // 说明：这里原本有一个 show_balloon_tip()（系统托盘气泡通知）。
 // 文件传输的状态呈现统一改走自绘浮窗（progress_window）后它已被删除 ——
 // 系统气泡与浮窗无法合并，两套并存只会把同一件事提示两遍。
@@ -520,10 +517,13 @@ fn set_auto_start(enabled: bool) -> bool {
     }
 }
 
-
 fn update_tray_tooltip(hwnd: HWND, pin: &str, ip: &str, port: u16, auto_sync: bool) {
     unsafe {
-        let mode_str = if auto_sync { "自动互传" } else { "手动模式" };
+        let mode_str = if auto_sync {
+            "自动互传"
+        } else {
+            "手动模式"
+        };
         let tip: Vec<u16> = OsStr::new(&format!(
             "CrossClip 互传 ({})\nIP: {}:{}\nPIN 码: {}",
             mode_str, ip, port, pin
@@ -571,8 +571,11 @@ unsafe extern "system" fn wnd_proc(
             unsafe {
                 let cds = &*(lparam as *const CopyDataStruct);
                 if cds.dw_data == COPYDATA_FILE_PATH && !cds.lp_data.is_null() {
-                    let bytes = std::slice::from_raw_parts(cds.lp_data as *const u8, cds.cb_data as usize);
-                    let path = String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string();
+                    let bytes =
+                        std::slice::from_raw_parts(cds.lp_data as *const u8, cds.cb_data as usize);
+                    let path = String::from_utf8_lossy(bytes)
+                        .trim_end_matches('\0')
+                        .to_string();
                     if !path.is_empty() {
                         let state_opt = GLOBAL_STATE.lock().unwrap().clone();
                         if let Some(state) = state_opt {
@@ -660,10 +663,8 @@ unsafe extern "system" fn wnd_proc(
                     } else {
                         "⚪ 自动互传模式: 已关闭 (点击切换)"
                     };
-                    let toggle_auto_text: Vec<u16> = OsStr::new(auto_str)
-                        .encode_wide()
-                        .chain(Some(0))
-                        .collect();
+                    let toggle_auto_text: Vec<u16> =
+                        OsStr::new(auto_str).encode_wide().chain(Some(0)).collect();
 
                     let is_autostart = is_auto_start_enabled();
                     let autostart_str = if is_autostart {
@@ -676,32 +677,50 @@ unsafe extern "system" fn wnd_proc(
                         .chain(Some(0))
                         .collect();
 
-                    let manual_send_text: Vec<u16> =
-                        OsStr::new("📤 手动发送当前剪贴板到手机")
-                            .encode_wide()
-                            .chain(Some(0))
-                            .collect();
+                    let manual_send_text: Vec<u16> = OsStr::new("📤 手动发送当前剪贴板到手机")
+                        .encode_wide()
+                        .chain(Some(0))
+                        .collect();
 
-                    let send_file_text: Vec<u16> =
-                        OsStr::new("📁 发送文件到手机...")
-                            .encode_wide()
-                            .chain(Some(0))
-                            .collect();
+                    let open_log_text: Vec<u16> = OsStr::new("📝 打开日志")
+                        .encode_wide()
+                        .chain(Some(0))
+                        .collect();
 
                     let quit_text: Vec<u16> = OsStr::new("❌ 退出 CrossClip")
                         .encode_wide()
                         .chain(Some(0))
                         .collect();
 
-                    AppendMenuW(hmenu, MF_STRING | MF_GRAYED, ID_TRAY_STATUS, status_text.as_ptr());
+                    AppendMenuW(
+                        hmenu,
+                        MF_STRING | MF_GRAYED,
+                        ID_TRAY_STATUS,
+                        status_text.as_ptr(),
+                    );
                     AppendMenuW(hmenu, MF_STRING | MF_GRAYED, ID_TRAY_IP, ip_text.as_ptr());
-                    AppendMenuW(hmenu, MF_STRING | MF_GRAYED, ID_TRAY_PHONE, phone_text.as_ptr());
+                    AppendMenuW(
+                        hmenu,
+                        MF_STRING | MF_GRAYED,
+                        ID_TRAY_PHONE,
+                        phone_text.as_ptr(),
+                    );
                     AppendMenuW(hmenu, MF_SEPARATOR, 0, null_mut());
                     AppendMenuW(hmenu, MF_STRING, ID_TRAY_PIN, pin_text.as_ptr());
                     AppendMenuW(hmenu, MF_STRING, ID_TRAY_REGEN_PIN, regen_text.as_ptr());
                     AppendMenuW(hmenu, MF_SEPARATOR, 0, null_mut());
-                    AppendMenuW(hmenu, MF_STRING, ID_TRAY_TOGGLE_AUTO, toggle_auto_text.as_ptr());
-                    AppendMenuW(hmenu, MF_STRING, ID_TRAY_AUTO_START, autostart_text.as_ptr());
+                    AppendMenuW(
+                        hmenu,
+                        MF_STRING,
+                        ID_TRAY_TOGGLE_AUTO,
+                        toggle_auto_text.as_ptr(),
+                    );
+                    AppendMenuW(
+                        hmenu,
+                        MF_STRING,
+                        ID_TRAY_AUTO_START,
+                        autostart_text.as_ptr(),
+                    );
                     if !is_auto {
                         AppendMenuW(
                             hmenu,
@@ -711,7 +730,7 @@ unsafe extern "system" fn wnd_proc(
                         );
                     }
                     AppendMenuW(hmenu, MF_SEPARATOR, 0, null_mut());
-                    AppendMenuW(hmenu, MF_STRING, ID_TRAY_SEND_FILE, send_file_text.as_ptr());
+                    AppendMenuW(hmenu, MF_STRING, ID_TRAY_OPEN_LOG, open_log_text.as_ptr());
                     AppendMenuW(hmenu, MF_SEPARATOR, 0, null_mut());
                     AppendMenuW(hmenu, MF_STRING, ID_TRAY_QUIT, quit_text.as_ptr());
 
@@ -739,8 +758,8 @@ unsafe extern "system" fn wnd_proc(
                         set_auto_start(!cur);
                     } else if cmd == ID_TRAY_SEND_MANUAL as i32 {
                         state.send_manual();
-                    } else if cmd == ID_TRAY_SEND_FILE as i32 {
-                        state.send_file_to_phone();
+                    } else if cmd == ID_TRAY_OPEN_LOG as i32 {
+                        logger::open_log_file();
                     } else if cmd == ID_TRAY_QUIT as i32 {
                         state.broadcaster.disconnect_all();
                         PostQuitMessage(0);
@@ -774,8 +793,12 @@ unsafe extern "system" fn wnd_proc(
 }
 
 fn main() {
+    logger::init();
+    log_info!("LOG", "CrossClip 桌面端启动");
+
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("CrossClip 崩溃: {:?}", info);
+        log_err!("PANIC", "{}", msg);
         let _ = std::fs::write("crossclip_crash.log", msg);
     }));
 
@@ -809,8 +832,7 @@ fn main() {
     let auto_sync_arc = Arc::new(AtomicBool::new(cfg.auto_sync));
 
     // 1. 广播器 (用于将电脑剪贴板并发推送到手机)
-    let broadcaster =
-        server::Broadcaster::new(pin_code_arc.clone(), cfg.device_id.clone());
+    let broadcaster = server::Broadcaster::new(pin_code_arc.clone(), cfg.device_id.clone());
 
     // 1.5 文件传输管理器
     let file_manager = Arc::new(file_transfer::FileTransferManager::new());
@@ -825,10 +847,16 @@ fn main() {
     );
 
     // 3. 启动 mDNS 广播
-    let _mdns =
-        mdns::start_mdns_broadcast(&cfg.device_name, cfg.http_port, &cfg.device_id);
+    let _mdns = mdns::start_mdns_broadcast(&cfg.device_name, cfg.http_port, &cfg.device_id);
 
     // 4. 启动 HTTP API 服务与 SSE 下发服务 (非阻塞多线程模型)
+    log_info!(
+        "STARTUP",
+        "本机 IP: {}, HTTP 端口: {}, 设备名: {}",
+        main_ip,
+        cfg.http_port,
+        cfg.device_name
+    );
     let pin_for_http = pin_code_arc.clone();
     let broadcaster_for_server = broadcaster.clone();
     let file_manager_for_server = file_manager.clone();

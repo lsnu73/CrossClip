@@ -569,9 +569,13 @@ class SyncForegroundService : Service() {
             sp.getString("pin_code_$currentTargetDeviceId", "") ?: ""
         } else ""
         pinCode = if (devPin.isNotEmpty()) devPin else (sp.getString("pin_code", "") ?: "")
-        currentPcIp = ""
-        currentPcName = "未连接"
-        DebugLogger.log("SVC_CONFIG", "加载配置: targetId=$currentTargetDeviceId, hintIp=$lastSavedPcIp, port=$currentHttpPort, pin.len=${pinCode.length}, autoSync=$autoSync")
+        // 睡眠唤醒后 onStartCommand 会再次调用 loadPreferences；若当前仍保持着连接，
+        // 不能清空 currentPcIp / currentPcName，否则会出现「connectionState=1 但发不出去」的状态分裂。
+        if (connectionState != 1) {
+            currentPcIp = ""
+            currentPcName = "未连接"
+        }
+        DebugLogger.log("SVC_CONFIG", "加载配置: targetId=$currentTargetDeviceId, hintIp=$lastSavedPcIp, port=$currentHttpPort, pin.len=${pinCode.length}, autoSync=$autoSync, 保留连接=${connectionState == 1}")
     }
 
     private fun initNetwork() {
@@ -1148,7 +1152,7 @@ class SyncForegroundService : Service() {
 
     private fun doBroadcastText(text: String, onComplete: ((Boolean) -> Unit)? = null) {
         acquireTransientWakeLock(3000L)
-        if (currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
+        if (connectionState == 1 && currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
             DebugLogger.log("SVC_SEND", "触发自动同步到 PC ($currentPcIp:$currentHttpPort)")
             HttpUploader.sendClipboard(
                 currentPcIp, currentHttpPort, text, deviceId, pinCode,

@@ -1,6 +1,6 @@
 [package]
 name = "cross_clip"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 
 [dependencies]
@@ -26,7 +26,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Threading",
     "Win32_System_Registry",
     "Win32_Security",
-    "Win32_System_Com"
+    "Win32_System_Com",
+    "Win32_System_SystemInformation"
 ] }
 
 [profile.release]

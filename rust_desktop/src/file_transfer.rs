@@ -146,8 +146,9 @@ impl FileTransferManager {
             });
 
         if let Some(existing) = &dedup_hit {
-            println!(
-                "[FileTransfer] 目标目录已存在相同文件，接收完成后将直接复用: {}",
+            log_info!(
+                "FileTransfer",
+                "目标目录已存在相同文件，接收完成后将直接复用: {}",
                 existing.display()
             );
         }
@@ -162,11 +163,16 @@ impl FileTransferManager {
             dedup_hit,
         };
 
-        self.incoming.lock().unwrap().insert(prepare.file_id.clone(), transfer);
+        self.incoming
+            .lock()
+            .unwrap()
+            .insert(prepare.file_id.clone(), transfer);
 
-        println!(
-            "[FileTransfer] 准备接收文件: {} ({} bytes)",
-            prepare.filename, prepare.file_size
+        log_info!(
+            "FileTransfer",
+            "准备接收文件: {} ({} bytes)",
+            prepare.filename,
+            prepare.file_size
         );
         Ok(())
     }
@@ -274,8 +280,9 @@ impl FileTransferManager {
         // 而跳过分块，这条路径都成立。
         if let Some(existing) = transfer.dedup_hit {
             let _ = fs::remove_file(&transfer.temp_path);
-            println!(
-                "[FileTransfer] 文件已存在，跳过落盘并复用: {}",
+            log_info!(
+                "FileTransfer",
+                "文件已存在，跳过落盘并复用: {}",
                 existing.display()
             );
             return Ok((existing, true));
@@ -292,10 +299,12 @@ impl FileTransferManager {
         }
 
         let final_path = unique_path(&transfer.final_path);
-        fs::rename(&transfer.temp_path, &final_path).map_err(|e| format!("重命名文件失败: {}", e))?;
+        fs::rename(&transfer.temp_path, &final_path)
+            .map_err(|e| format!("重命名文件失败: {}", e))?;
 
-        println!(
-            "[FileTransfer] 文件接收完成: {} -> {}",
+        log_ok!(
+            "FileTransfer",
+            "文件接收完成: {} -> {}",
             transfer.filename,
             final_path.display()
         );
@@ -348,7 +357,10 @@ impl FileTransferManager {
             file_path: path,
         };
 
-        self.outgoing.lock().unwrap().insert(file_id, transfer.clone());
+        self.outgoing
+            .lock()
+            .unwrap()
+            .insert(file_id, transfer.clone());
         Ok(transfer)
     }
 
@@ -372,12 +384,7 @@ impl FileTransferManager {
                 return Err("分块索引越界".to_string());
             }
             let len = std::cmp::min(CHUNK_SIZE as u64, transfer.file_size - offset) as usize;
-            (
-                transfer.file_path.clone(),
-                offset,
-                len,
-                transfer.file_size,
-            )
+            (transfer.file_path.clone(), offset, len, transfer.file_size)
         };
         let _ = file_size;
 
