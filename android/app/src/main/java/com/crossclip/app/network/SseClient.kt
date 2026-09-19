@@ -10,7 +10,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 class SseClient(
-    private val onMessageReceived: (encrypted: String, hash: String, senderId: String) -> Unit,
+    // lamportClock：电脑端（hub）分配的单调时钟，-1 表示老版本电脑端未携带（不做时钟裁决）。
+    // 手机端据此丢弃重复投递（SSE 与 HTTP 兜底双通道各送一次同一条内容）与在途旧事件。
+    private val onMessageReceived: (encrypted: String, lamportClock: Long, senderId: String) -> Unit,
     private val onConnectionChanged: (Boolean) -> Unit,
     private val onFileEvent: ((eventType: String, data: JSONObject) -> Unit)? = null
 ) {
@@ -83,11 +85,11 @@ class SseClient(
                                                 onFileEvent?.invoke(type, json)
                                             } else {
                                                 val enc = json.optString("encrypted", "")
-                                                val hash = json.optString("hash", "")
+                                                val clock = json.optLong("lamport_clock", -1L)
                                                 val sender = json.optString("sender_id", "电脑端")
                                                 if (enc.isNotEmpty()) {
-                                                    DebugLogger.log("SSE", "收到电脑端下发数据: hash=$hash, sender=$sender, 加密包长度=${enc.length}")
-                                                    onMessageReceived(enc, hash, sender)
+                                                    DebugLogger.log("SSE", "收到电脑端下发数据: clock=$clock, sender=$sender, 加密包长度=${enc.length}")
+                                                    onMessageReceived(enc, clock, sender)
                                                 }
                                             }
                                         } catch (e: Exception) {

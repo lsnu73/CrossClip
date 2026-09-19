@@ -10,6 +10,10 @@ pub struct AppConfig {
     pub pin_code: String,
     pub http_port: u16,
     pub auto_sync: bool,
+    /// 剪贴板同步时钟（hub 单调递增，见 clipboard.rs 模块注释）。
+    /// 必须持久化：电脑端重启后若时钟回退，手机端会把后续推送判为旧事件丢弃。
+    #[serde(default)]
+    pub lamport_clock: u64,
 }
 
 pub fn generate_random_pin() -> String {
@@ -57,6 +61,7 @@ pub fn load_or_init_config() -> AppConfig {
         pin_code: pin,
         http_port: 18236,
         auto_sync: true,
+        lamport_clock: 0,
     };
 
     save_config(&new_cfg);
@@ -79,6 +84,12 @@ pub fn update_persisted_pin(new_pin: &str) {
 pub fn update_persisted_auto_sync(auto_sync: bool) {
     let mut cfg = load_or_init_config();
     cfg.auto_sync = auto_sync;
+    save_config(&cfg);
+}
+
+pub fn update_persisted_clock(clock: u64) {
+    let mut cfg = load_or_init_config();
+    cfg.lamport_clock = clock;
     save_config(&cfg);
 }
 

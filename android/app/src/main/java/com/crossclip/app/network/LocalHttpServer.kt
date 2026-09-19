@@ -30,7 +30,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class LocalHttpServer(
     private val port: Int = 18237,
-    private val onSyncReceived: ((encrypted: String, hash: String, senderId: String) -> Unit)? = null
+    // lamportClock：电脑端（hub）分配的单调时钟，-1 表示老版本电脑端未携带（不做时钟裁决）。
+    // 与 SSE 通道收到的是同一条内容，靠时钟相等判定实现天然幂等。
+    private val onSyncReceived: ((encrypted: String, lamportClock: Long, senderId: String) -> Unit)? = null
 ) {
     private val TAG = "LocalHttpServer"
 
@@ -260,11 +262,11 @@ class LocalHttpServer(
                 try {
                     val json = JSONObject(String(request.body, Charsets.UTF_8))
                     val enc = json.optString("encrypted", "")
-                    val hash = json.optString("hash", "")
+                    val clock = json.optLong("lamport_clock", -1L)
                     val sender = json.optString("sender_id", "电脑端")
                     if (enc.isNotEmpty()) {
-                        DebugLogger.log("LOCAL_HTTP", "收到电脑端对等 HTTP POST 推送: remote=$remoteIp, hash=$hash, 加密包长度=${enc.length}")
-                        onSyncReceived?.invoke(enc, hash, sender)
+                        DebugLogger.log("LOCAL_HTTP", "收到电脑端对等 HTTP POST 推送: remote=$remoteIp, clock=$clock, 加密包长度=${enc.length}")
+                        onSyncReceived?.invoke(enc, clock, sender)
                         writeJson(out, 200, "{\"status\":\"ok\"}", keepAlive)
                     } else {
                         writeJson(out, 400, "{\"error\":\"missing_encrypted_payload\"}", keepAlive)

@@ -65,8 +65,16 @@ class SyncForegroundService : Service() {
     )
 
     companion object {
-        /** 防回环去重窗口：超过该时长的同内容复制视为用户主动行为，放行同步 */
-        private const val DEDUP_WINDOW_MS = 60_000L
+        /**
+         * 同文本「重申」放行窗口（毫秒）。
+         *
+         * 取代旧版 60 秒哈希去重窗口：用户重申同一段内容（清空后重推、重复复制）
+         * 与「刚写入内容的回声/监听器双发」在内容上不可区分，唯一可观测差异是时间 ——
+         * 回声与重复触发发生在写入后的毫秒~1 秒内（原生监听 + Shizuku 监听 + 轮询兜底），
+         * 而用户重申是主动复制事件。窗口只需盖住触发链爆发期，取 3 秒。
+         * 旧版 60 秒窗口会把几分钟后合法的重复复制静默吞掉（表现为「监听触发了但没同步」）。
+         */
+        private const val ECHO_SUPPRESS_WINDOW_MS = 3_000L
 
         /** 静默守护通知渠道（IMPORTANCE_MIN，可在系统设置中关闭展示） */
         const val CHANNEL_ID = "cross_clip_silent_v2"
@@ -135,34 +143,24 @@ class SyncForegroundService : Service() {
 
     private lateinit var clipboardManager: ClipboardManager
     private val mainHandler = Handler(Looper.getMainLooper())
+
     /**
-     * 防回环去重表：hash → 注册时刻。
+     * 剪贴板同步状态机（重构后，取代旧版 recentHashes 哈希去重表）。
      *
-     * 判重只看**时间窗**内（[DEDUP_WINDOW_MS]）的记录，过期即允许同一内容再次同步 ——
-     * 回环反射与监听器双发都发生在秒级，而用户几分钟后故意重新复制同一段内容是合法诉求
-     * （此时电脑端剪贴板可能早已变成别的内容）。旧实现用纯 Set 存最近 50 条、永不过期，
-     * 重复制同内容会被无声吞掉，且毫无日志，排查时表现为「监听触发了但没同步」。
+     * 状态收敛为「一条记录 + 一个时钟」（方案一「服务端一条记录、客户端一个字段」）：
+     * - [knownClipboardText] / [knownClipboardAt]：本机剪贴板最近一次已处理内容与登记时刻。
+     *   三个写入来源：本地复制推送前、收到电脑端内容写入前 —— 回声/重复触发靠
+     *   「同文本 + 窗口内」命中跳过；「同文本 + 窗口过期 + 真实复制事件」放行（用户重申）。
+     * - [lastSeenClipboardClock]：电脑端（hub）分配的单调时钟，据此丢弃重复投递
+     *   （SSE 与 HTTP 兜底双通道各送一次同一条内容）与在途旧事件。
+     *   手机端不持久化时钟：进程重启后归零，下一次事件必然接受，零恢复成本。
      */
-    private val recentHashes = LinkedHashMap<String, Long>(64)
+    private val syncStateLock = Any()
+    private var knownClipboardText: String = ""
+    private var knownClipboardAt: Long = 0L
 
-    /** 该哈希是否命中去重窗口（顺带清理过期与超量记录，Map 按插入序淘汰最旧） */
-    private fun isRecentlySeenHash(hash: String): Boolean = synchronized(recentHashes) {
-        val now = System.currentTimeMillis()
-        val it = recentHashes.entries.iterator()
-        while (it.hasNext()) {
-            val entry = it.next()
-            if (now - entry.value > DEDUP_WINDOW_MS || recentHashes.size > 50) it.remove() else break
-        }
-        recentHashes.containsKey(hash)
-    }
-
-    /** 登记一个刚发送/刚接收内容的哈希，用于防回环去重 */
-    private fun rememberHash(hash: String) = synchronized(recentHashes) {
-        recentHashes[hash] = System.currentTimeMillis()
-        while (recentHashes.size > 50) {
-            recentHashes.remove(recentHashes.keys.first())
-        }
-    }
+    @Volatile
+    private var lastSeenClipboardClock: Long = 0L
 
     private lateinit var lanDiscovery: LanDiscovery
     private lateinit var nsdHelper: NsdHelper
@@ -245,7 +243,7 @@ class SyncForegroundService : Service() {
 
     private val clipListener = ClipboardManager.OnPrimaryClipChangedListener {
         DebugLogger.log("CLIP_SYS", "原生 PrimaryClipChangedListener 触发")
-        onLocalClipboardChanged()
+        onLocalClipboardChanged(eventSource = true)
     }
 
     override fun onCreate() {
@@ -269,11 +267,11 @@ class SyncForegroundService : Service() {
         // 注册 Shizuku 底层特权剪贴板变化监听
         ShizukuClipboardManager.registerListener {
             DebugLogger.log("CLIP_SHIZUKU", "Shizuku 底层特权监听回调触发")
-            onLocalClipboardChanged()
+            onLocalClipboardChanged(eventSource = true)
         }
-        // 轮询兜底：独立后台守护线程定期感知复制
+        // 轮询兜底：独立后台守护线程定期感知复制（观察型触发，只补漏）
         ShizukuClipboardManager.startPolling {
-            onLocalClipboardChanged()
+            onLocalClipboardChanged(eventSource = false)
         }
 
         loadPreferences()
@@ -284,15 +282,11 @@ class SyncForegroundService : Service() {
         startHeartbeat()
 
         // 启动本地微型 HTTP 服务端 (监听端口 18237)
-        localHttpServer = LocalHttpServer(18237) { encrypted, hash, _ ->
+        localHttpServer = LocalHttpServer(18237) { encrypted, clock, _ ->
             if (pinCode.isNotEmpty()) {
                 try {
                     val decrypted = CryptoUtil.decrypt(encrypted, pinCode)
-                    if (CryptoUtil.computeHash(decrypted) == hash) {
-                        onNetworkTextReceived(decrypted)
-                    } else {
-                        DebugLogger.log("LOCAL_HTTP", "解密文本 Hash 不匹配: 计算=${CryptoUtil.computeHash(decrypted)} vs 接收=$hash")
-                    }
+                    onNetworkTextReceived(decrypted, clock)
                 } catch (e: Exception) {
                     DebugLogger.log("LOCAL_HTTP", "解密对等推送剪贴板异常: ${e.message}", e)
                 }
@@ -400,7 +394,9 @@ class SyncForegroundService : Service() {
                     DebugLogger.log("DIAG_COMPLETE", "→ showFileReceiveCompleteNotification 已返回")
                     updateNotification("✅ 文件接收完成")
                 } else {
-                    DebugLogger.err("FILE_RECEIVE", "文件接收失败: 哈希不匹配或数据不完整")
+                    // 失败原因（哈希不匹配 / 临时文件缺失 / 落盘失败）已由 FileReceiver
+                    // 与 SaveDirManager 各自记入上方日志，这里不再误导性地断言是哈希问题
+                    DebugLogger.err("FILE_RECEIVE", "文件接收失败 (具体原因见上方 FILE_RECEIVE / SaveDirManager 日志)")
                     showFileReceiveFailedNotification()
                     updateNotification("❌ 文件接收失败")
                 }
@@ -502,7 +498,8 @@ class SyncForegroundService : Service() {
                     workerExecutor.execute {
                         if (action == "com.crossclip.app.WAKEUP") {
                             DebugLogger.log("WAKEUP_PULSE", "收到 Shell (UID 2000) 守护心跳唤醒脉冲")
-                            onLocalClipboardChanged()
+                            // 观察型触发：只补漏（进程冻结期间漏掉的复制），内容未变化时不重推
+                            onLocalClipboardChanged(eventSource = false)
                             // 心跳统一走节流入口：脉冲只负责「解冻进程 + 兜底读剪贴板」，
                             // 不必每次（10 秒）都发一次 HTTP 上报
                             sendHeartbeatThrottled()
@@ -518,7 +515,7 @@ class SyncForegroundService : Service() {
                         DebugLogger.log("SVC_BROADCAST", "收到系统广播: $action")
                         if (action == Intent.ACTION_SCREEN_ON || action == Intent.ACTION_USER_PRESENT) {
                             ShizukuClipboardManager.resumePollingForScreenOn()
-                            onLocalClipboardChanged()
+                            onLocalClipboardChanged(eventSource = false)
                             // 亮屏同样走节流入口，连续亮灭屏时不会高频重复上报
                             sendHeartbeatThrottled()
                         }
@@ -580,15 +577,11 @@ class SyncForegroundService : Service() {
     private fun initNetwork() {
         // SSE 客户端：长连接监听电脑端复制下发的剪贴板内容
         sseClient = SseClient(
-            onMessageReceived = { encrypted, hash, _ ->
+            onMessageReceived = { encrypted, clock, _ ->
                 if (pinCode.isNotEmpty()) {
                     try {
                         val decrypted = CryptoUtil.decrypt(encrypted, pinCode)
-                        if (CryptoUtil.computeHash(decrypted) == hash) {
-                            onNetworkTextReceived(decrypted)
-                        } else {
-                            DebugLogger.log("SVC_NET", "解密文本 Hash 不匹配: 计算=${CryptoUtil.computeHash(decrypted)} vs 接收=$hash")
-                        }
+                        onNetworkTextReceived(decrypted, clock)
                     } catch (e: Exception) {
                         Log.w(TAG, "解密电脑端下发剪贴板异常: ${e.message}")
                         DebugLogger.log("SVC_NET", "解密电脑端下发剪贴板异常: ${e.message}", e)
@@ -873,6 +866,7 @@ class SyncForegroundService : Service() {
                             currentHttpPort = httpPort
                             currentPcName = devName ?: name
                             DebugLogger.ok("DISCOVERY", "已连接电脑 IP 动态漂移热重连成功: $ip")
+                            resetClipboardClockBaseline()
                             val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
                             sp.edit().putString("last_pc_ip", ip).putString("last_pc_name", currentPcName).apply()
                             val sseUrl = "http://$ip:$httpPort/events?pin=$pinCode"
@@ -914,6 +908,7 @@ class SyncForegroundService : Service() {
                         connectionState = 1
                         lanDiscovery.isConnected = true
                         DebugLogger.ok("DISCOVERY", "自动握手成功，已连接 $name ($ip)")
+                        resetClipboardClockBaseline()
                         val boundId = retDevId ?: finalDevId
                         currentTargetDeviceId = boundId
                         currentPcIp = ip
@@ -1054,6 +1049,7 @@ class SyncForegroundService : Service() {
                     lanDiscovery.isConnected = true
                     currentPcName = devName ?: "Windows 电脑"
                     DebugLogger.ok("SVC_ACTION", "PIN 码配对成功: $currentPcName ($ip:$httpPort)")
+                    resetClipboardClockBaseline()
                     if (!retDevId.isNullOrEmpty()) {
                         currentTargetDeviceId = retDevId
                         val prefs = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
@@ -1086,7 +1082,19 @@ class SyncForegroundService : Service() {
         }
     }
 
-    private fun onLocalClipboardChanged() {
+    /**
+     * 本机剪贴板变化入口（三条触发链 + 亮屏/唤醒脉冲共用）。
+     *
+     * 去重判定收敛为一次记录比对（见 [syncStateLock] 状态说明）：
+     * - 内容与已知记录不同 → 新内容，推送；
+     * - 内容相同 → 观察型触发（轮询/脉冲/亮屏）一律静默，只承担「补漏」职责；
+     *   真实复制事件（原生/Shizuku 监听）在回声窗口过期后作为「用户重申」放行，
+     *   覆盖「Win+V 清空后重推旧内容」「清空后重复制同内容」等场景。
+     * 检查与登记在同一个锁内原子完成，多触发链并发时只有一路能通过。
+     *
+     * @param eventSource true = 真实复制事件（监听器回调）；false = 轮询兜底/亮屏/唤醒脉冲
+     */
+    private fun onLocalClipboardChanged(eventSource: Boolean) {
         if (!autoSync || selfTestWriteInProgress) return
         try {
             var text: String? = null
@@ -1098,28 +1106,40 @@ class SyncForegroundService : Service() {
             if (text.isNullOrEmpty()) {
                 val clip = clipboardManager.primaryClip
                 if (clip != null && clip.itemCount > 0) {
+                    // 只取 item.text（真纯文本），不做 coerceToText 降级：
+                    // 复制图片/文件得到的是 URI/Intent，转成文本推送违反「仅同步纯文本」约束
                     text = clip.getItemAt(0).text?.toString()
                     readSource = "SystemClip"
                 }
             }
-            if (!text.isNullOrEmpty()) {
-                val hash = CryptoUtil.computeHash(text)
-                if (isRecentlySeenHash(hash)) {
-                    val preview = if (text.length > 20) text.take(20) + "..." else text
-                    Log.i(TAG, "剪贴板内容与近期同步记录相同，跳过（防回环去重）")
-                    DebugLogger.log(
-                        "CLIP_DETECT",
-                        "剪贴板内容命中近期去重记录，跳过同步（防回环）: 长度=${text.length}, 预览=[$preview]"
-                    )
-                    return
+            if (text.isNullOrEmpty()) return
+
+            val shouldPush = synchronized(syncStateLock) {
+                if (text == knownClipboardText) {
+                    val elapsed = System.currentTimeMillis() - knownClipboardAt
+                    if (!eventSource || elapsed < ECHO_SUPPRESS_WINDOW_MS) {
+                        return@synchronized false
+                    }
+                    // 用户重申同一段内容：以全新事件放行
                 }
-                rememberHash(hash)
-                val preview = if (text.length > 20) text.take(20) + "..." else text
-                Log.i(TAG, "检测到本地复制 ($readSource)，正在静默自动同步至电脑...")
-                lastSyncEvent = "手机复制: 长度 ${text.length}"
-                DebugLogger.log("CLIP_DETECT", "检测到本地新剪贴板 [$readSource]: 长度=${text.length}, hash=$hash, 预览=[$preview]")
-                doBroadcastText(text)
+                knownClipboardText = text
+                knownClipboardAt = System.currentTimeMillis()
+                true
             }
+            if (!shouldPush) {
+                val preview = if (text.length > 20) text.take(20) + "..." else text
+                Log.i(TAG, "剪贴板内容与近期记录相同，跳过（防回声/重复触发）")
+                DebugLogger.log(
+                    "CLIP_DETECT",
+                    "剪贴板内容命中已知记录，跳过同步 (eventSource=$eventSource): 长度=${text.length}, 预览=[$preview]"
+                )
+                return
+            }
+            val preview = if (text.length > 20) text.take(20) + "..." else text
+            Log.i(TAG, "检测到本地复制 ($readSource)，正在静默自动同步至电脑...")
+            lastSyncEvent = "手机复制: 长度 ${text.length}"
+            DebugLogger.log("CLIP_DETECT", "检测到本地新剪贴板 [$readSource] (eventSource=$eventSource): 长度=${text.length}, 预览=[$preview]")
+            doBroadcastText(text)
         } catch (e: Exception) {
             Log.e(TAG, "读取剪贴板异常: ${e.message}")
             DebugLogger.log("CLIP_DETECT", "读取剪贴板异常: ${e.javaClass.simpleName}: ${e.message}", e)
@@ -1130,33 +1150,73 @@ class SyncForegroundService : Service() {
         acquireTransientWakeLock(3000L)
         if (currentPcIp.isNotEmpty() && pinCode.isNotEmpty()) {
             DebugLogger.log("SVC_SEND", "触发自动同步到 PC ($currentPcIp:$currentHttpPort)")
-            HttpUploader.sendClipboard(currentPcIp, currentHttpPort, text, deviceId, pinCode) { success ->
-                if (success) {
-                    DebugLogger.ok("SVC_SEND", "自动同步成功 (长度 ${text.length})")
-                    // 发送成功才算完成一次同步，计入统计行
-                    SyncStats.record(applicationContext)
-                } else {
-                    DebugLogger.warn("SVC_SEND", "自动同步失败: 电脑端未确认")
-                }
-                onComplete?.invoke(success)
-            }
+            HttpUploader.sendClipboard(
+                currentPcIp, currentHttpPort, text, deviceId, pinCode,
+                onResult = { success ->
+                    if (success) {
+                        DebugLogger.ok("SVC_SEND", "自动同步成功 (长度 ${text.length})")
+                        // 发送成功才算完成一次同步，计入统计行
+                        SyncStats.record(applicationContext)
+                    } else {
+                        DebugLogger.warn("SVC_SEND", "自动同步失败: 电脑端未确认")
+                    }
+                    onComplete?.invoke(success)
+                },
+                onServerClock = { clock -> updateLastSeenClipboardClock(clock) }
+            )
         } else {
             DebugLogger.log("SVC_SEND", "尚未连接电脑，跳过自动同步")
             onComplete?.invoke(false)
         }
     }
 
-    private fun onNetworkTextReceived(text: String) {
+    /** 记录电脑端（hub）为已发送内容分配的时钟，用于丢弃仍在途的更旧事件 */
+    private fun updateLastSeenClipboardClock(clock: Long) {
+        if (clock < 0) return
+        synchronized(syncStateLock) {
+            if (clock > lastSeenClipboardClock) {
+                lastSeenClipboardClock = clock
+                DebugLogger.log("CLIP_CLOCK", "同步时钟已追赶至电脑端: $clock")
+            }
+        }
+    }
+
+    /** 与电脑（重新）建立连接后归零时钟基线：新连接的首次事件时钟必然 ≥1，不会被误判为旧事件 */
+    private fun resetClipboardClockBaseline() {
+        synchronized(syncStateLock) {
+            lastSeenClipboardClock = 0L
+        }
+    }
+
+    private fun onNetworkTextReceived(text: String, clock: Long) {
         acquireTransientWakeLock(3000L)
-        val hash = CryptoUtil.computeHash(text)
-        rememberHash(hash)
+
+        // 时钟裁决 + 回声登记，必须在锁内原子完成：
+        // 1. 时钟未前进 → SSE 与 HTTP 兜底双通道重复投递同一条内容，或在途旧事件，丢弃；
+        // 2. 登记先行于写入 —— 随后写入触发的本地剪贴板变化事件会命中「同文本 + 新鲜」
+        //    被跳过，这是防回环的根本手段（不依赖哈希，也不依赖时间窗巧合）。
+        synchronized(syncStateLock) {
+            if (clock >= 0 && clock <= lastSeenClipboardClock) {
+                DebugLogger.log("CLIP_RECV", "剪贴板事件时钟未前进 (clock=$clock <= $lastSeenClipboardClock)，判定为重复投递/在途旧事件，丢弃")
+                return
+            }
+            if (clock >= 0) lastSeenClipboardClock = clock
+            knownClipboardText = text
+            knownClipboardAt = System.currentTimeMillis()
+        }
 
         val preview = if (text.length > 20) text.take(20) + "..." else text
-        DebugLogger.log("CLIP_RECV", "收到电脑端下发剪贴板: 长度=${text.length}, hash=$hash, 预览=[$preview]")
-        // 解密且哈希校验已通过，这是一次完成的接收同步，计入统计行
+        DebugLogger.log("CLIP_RECV", "收到电脑端下发剪贴板: 长度=${text.length}, clock=$clock, 预览=[$preview]")
+        // 解密且时钟裁决通过，这是一次完成的接收同步，计入统计行
         SyncStats.record(applicationContext)
 
         mainHandler.post {
+            // 写入前复核：登记与实际写入之间用户可能复制了新内容，绝不覆盖用户的更新复制
+            val stillCurrent = synchronized(syncStateLock) { knownClipboardText == text }
+            if (!stillCurrent) {
+                DebugLogger.log("CLIP_WRITE", "登记后本机剪贴板已被本地复制更新，放弃写入远端内容")
+                return@post
+            }
             // 1. 优先尝试 Shizuku 特权静默写入
             if (ShizukuClipboardManager.isReady()) {
                 val written = ShizukuClipboardManager.writeClipboard(text)
@@ -1196,8 +1256,7 @@ class SyncForegroundService : Service() {
 
     fun sendTextManual(text: String, callback: ((Boolean) -> Unit)? = null) {
         if (text.isNotEmpty()) {
-            val hash = CryptoUtil.computeHash(text)
-            rememberHash(hash)
+            // 手动发送是用户显式意图，不做去重登记（本机剪贴板并未因发送而变化，不会触发回声）
             if (currentPcIp.isEmpty() || pinCode.isEmpty()) {
                 Toast.makeText(applicationContext, "尚未连接电脑，请输入电脑显示的 6 位 PIN 码", Toast.LENGTH_SHORT).show()
                 callback?.invoke(false)
@@ -1205,7 +1264,7 @@ class SyncForegroundService : Service() {
             }
 
             DebugLogger.log("SVC_MANUAL", "手动发送剪贴板 (长度 ${text.length})")
-            HttpUploader.sendClipboard(currentPcIp, currentHttpPort, text, deviceId, pinCode) { success ->
+            HttpUploader.sendClipboard(currentPcIp, currentHttpPort, text, deviceId, pinCode, onResult = { success ->
                 mainHandler.post {
                     if (success) {
                         Toast.makeText(applicationContext, "已发送至电脑", Toast.LENGTH_SHORT).show()
@@ -1215,7 +1274,7 @@ class SyncForegroundService : Service() {
                         callback?.invoke(false)
                     }
                 }
-            }
+            })
         }
     }
 

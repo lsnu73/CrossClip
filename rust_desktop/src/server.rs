@@ -86,7 +86,9 @@ struct HeartbeatRequest {
 #[allow(dead_code)]
 struct SyncRequest {
     encrypted: String,
-    hash: String,
+    /// 兼容字段：新算法的去重不依赖内容哈希（AES-GCM 已保证完整性），
+    /// 但老版本手机端仍会携带并校验该字段，故保留解析、不再强制。
+    hash: Option<String>,
     sender_id: Option<String>,
     timestamp: Option<u64>,
 }
@@ -200,7 +202,7 @@ impl Broadcaster {
         }
     }
 
-    pub fn broadcast_text(&self, text: &str) {
+    pub fn broadcast_text(&self, text: &str, clock: u64) {
         if text.trim().is_empty() {
             return;
         }
@@ -212,11 +214,15 @@ impl Broadcaster {
                 .unwrap_or_default()
                 .as_millis() as u64;
 
+            // lamport_clock：hub 分配的单调时钟。手机端据此丢弃重复投递
+            // （SSE 与 HTTP 兜底双通道会各送一次同一条内容）与在途旧事件。
+            // hash 字段仅为老版本手机端保留，新算法不再使用。
             let payload = serde_json::json!({
                 "type": "CLIP_SYNC",
                 "encrypted": encrypted,
                 "hash": hash,
                 "sender_id": self.device_id,
+                "lamport_clock": clock,
                 "timestamp": now_ms
             })
             .to_string();
@@ -842,17 +848,33 @@ fn handle_client_request(
             if let Ok(sync_req) = serde_json::from_str::<SyncRequest>(&body) {
                 let current_pin = pin_code.read().unwrap().clone();
                 if let Ok(decrypted) = crate::crypto::decrypt(&sync_req.encrypted, &current_pin) {
-                    if crate::crypto::compute_hash(&decrypted) == sync_req.hash {
+                    // hash 字段可选且不再参与去重；老版本手机端仍携带，带则照旧校验完整性
+                    let hash_ok = match sync_req.hash.as_deref() {
+                        Some(h) => crate::crypto::compute_hash(&decrypted) == h,
+                        None => true,
+                    };
+                    if hash_ok && !decrypted.trim().is_empty() {
                         broadcaster.register_peer(client_ip, 18237, "android_phone".to_string(), "安卓手机".to_string(), String::new());
 
+                        // hub 统一分配单调时钟：到达序即用户意图序；登记先行于写入，
+                        // 随后的本地剪贴板变化事件命中记录被跳过（防回环）
+                        let sender = sync_req.sender_id.unwrap_or_else(|| "手机端".to_string());
+                        let clock = crate::clipboard::begin_remote_push(&sender, &decrypted);
                         crate::clipboard::set_clipboard_text(&decrypted);
 
-                        let sender = sync_req.sender_id.unwrap_or_else(|| "手机端".to_string());
                         on_text_received(decrypted, sender);
 
-                        let resp = Response::from_string(r#"{"status":"ok","message":"synced"}"#)
-                            .with_header(cors_header)
-                            .with_header(content_type);
+                        let resp = Response::from_string(
+                            serde_json::json!({
+                                "status": "ok",
+                                "message": "synced",
+                                // 手机端记录该时钟，用于丢弃仍在途的更旧事件
+                                "lamport_clock": clock
+                            })
+                            .to_string(),
+                        )
+                        .with_header(cors_header)
+                        .with_header(content_type);
                         let _ = request.respond(resp);
                         return;
                     }

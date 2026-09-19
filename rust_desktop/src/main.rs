@@ -115,7 +115,9 @@ impl AppState {
     pub fn send_manual(&self) {
         if let Some(txt) = crate::clipboard::get_clipboard_text() {
             if !txt.trim().is_empty() {
-                self.broadcaster.broadcast_text(&txt);
+                // 手动发送是用户显式意图：绕过去重判定，直接分配新时钟推送
+                let clock = crate::clipboard::begin_local_manual_push(&txt);
+                self.broadcaster.broadcast_text(&txt, clock);
             }
         }
     }
@@ -587,8 +589,9 @@ unsafe extern "system" fn wnd_proc(
                 if state.auto_sync.load(Ordering::SeqCst) {
                     // 避让 15ms 允许复制源应用程序完成写操作并安全关闭剪贴板句柄
                     std::thread::sleep(std::time::Duration::from_millis(15));
-                    if let Some(text) = crate::clipboard::on_clipboard_updated() {
-                        state.broadcaster.broadcast_text(&text);
+                    // 真实复制事件：event_triggered=true，同内容超窗后允许作为「用户重申」放行
+                    if let Some((text, clock)) = crate::clipboard::observe_clipboard_change(true) {
+                        state.broadcaster.broadcast_text(&text, clock);
                     }
                 }
             }
@@ -795,6 +798,8 @@ fn main() {
 
     let cfg = config::load_or_init_config();
     let initial_pin = cfg.pin_code.clone();
+    // 用持久化时钟初始化剪贴板同步状态机（重启后时钟不回退，手机端才不会丢事件）
+    crate::clipboard::init_sync_state(cfg.lamport_clock);
     let pin_code_arc = Arc::new(RwLock::new(initial_pin.clone()));
     let lan_ips = ip_util::get_local_lan_ips();
     let main_ip = lan_ips
@@ -846,8 +851,9 @@ fn main() {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(2000));
             if auto_sync_for_poll.load(Ordering::SeqCst) {
-                if let Some(text) = crate::clipboard::on_clipboard_updated() {
-                    broadcaster_for_poll.broadcast_text(&text);
+                // 轮询属观察型触发：只在内容相对记录变化时补推，绝不重推未变化的旧内容
+                if let Some((text, clock)) = crate::clipboard::observe_clipboard_change(false) {
+                    broadcaster_for_poll.broadcast_text(&text, clock);
                 }
             }
         }

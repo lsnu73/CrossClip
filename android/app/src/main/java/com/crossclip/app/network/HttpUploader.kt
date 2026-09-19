@@ -99,6 +99,11 @@ object HttpUploader {
 
     /**
      * 向电脑端发送剪贴板数据
+     *
+     * @param onServerClock 电脑端（hub）为本次内容分配的单调时钟回传。
+     *                      手机端据此追赶时钟：当一条更旧的 SSE 事件仍在途时，
+     *                      已拿到更大时钟的手机端会将其正确丢弃，保住本地更新的复制。
+     *                      老版本电脑端响应不含该字段（-1），静默忽略。
      */
     fun sendClipboard(
         pcIp: String,
@@ -106,7 +111,8 @@ object HttpUploader {
         text: String,
         deviceId: String,
         pinCode: String,
-        onResult: ((Boolean) -> Unit)? = null
+        onResult: ((Boolean) -> Unit)? = null,
+        onServerClock: ((Long) -> Unit)? = null
     ) {
         val url = "http://$pcIp:$httpPort/sync"
         val encryptedPayload = CryptoUtil.encrypt(text, pinCode)
@@ -119,6 +125,7 @@ object HttpUploader {
         val json = JSONObject().apply {
             put("type", "CLIP_SYNC")
             put("sender_id", deviceId)
+            // 兼容字段：老版本电脑端仍强制校验该 hash，保留；新算法两端均不以其去重
             put("hash", textHash)
             put("encrypted", encryptedPayload)
             put("timestamp", System.currentTimeMillis())
@@ -139,6 +146,16 @@ object HttpUploader {
                 val elapsed = System.currentTimeMillis() - startTime
                 response.use {
                     if (response.isSuccessful) {
+                        // 解析响应里的 lamport_clock（hub 分配），交给上层追赶时钟
+                        try {
+                            val body = response.body?.string() ?: ""
+                            val serverClock = JSONObject(body).optLong("lamport_clock", -1L)
+                            if (serverClock >= 0) {
+                                onServerClock?.invoke(serverClock)
+                            }
+                        } catch (e: Exception) {
+                            DebugLogger.log("HTTP", "解析同步响应时钟失败（忽略）: ${e.message}")
+                        }
                         Log.i(TAG, "成功通过 HTTP 将剪贴板同步至电脑")
                         DebugLogger.log("HTTP", "成功将剪贴板同步至电脑 (耗时 ${elapsed}ms, 状态码: ${response.code})")
                         onResult?.invoke(true)

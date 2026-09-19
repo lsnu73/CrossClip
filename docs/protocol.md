@@ -17,10 +17,30 @@
 key       = SHA-256(pin_code)              # pin_code 为 6 位动态 PIN
 nonce     = random(12 bytes)
 payload   = base64(nonce || AES-256-GCM(key, nonce, text))
-hash      = SHA-256(text)                  # 防回环与完整性校验
+hash      = SHA-256(text)                  # 兼容字段: 老版本仍校验, 新算法不依赖
 ```
 
-双端各自维护近期内容哈希环形队列:收到远端内容写入本地剪贴板后,若哈希命中本机近期的发送记录,则判定为回环并过滤,避免两台设备互相触发无限反射同步。
+## 剪贴板同步算法(纯文本)
+
+状态收敛为「**一条记录 + 一个单调时钟**」(电脑端为 hub, 唯一时钟分配方):
+
+- 电脑端 `clipboard.rs` 维护 `SYNC_RECORD = {device_id, clock, text, updated_at}` 与
+  持久化于 config.json 的 `lamport_clock`(重启不回退);
+- 手机端 `SyncForegroundService` 维护 `knownClipboardText/At`(最近一次已处理内容)与
+  `lastSeenClipboardClock`(不持久化, 建连/重启归零);
+- 时钟由电脑端在受理每条内容(本地复制 / 手机来文)时 +1 并随消息下发。
+
+去重与防回环规则:
+
+1. **非文本源头过滤**: 电脑端剪贴板带 `CF_HDROP`(复制文件)不同步; 双端只取真纯文本
+   (`CF_UNICODETEXT` / `item.text`), 不做 coerce 降级 —— 图片/文件等非文本内容不做同步;
+2. **变化判定**: 内容与已知记录不同 → 新内容, 推送; 相同 → 仅「真实复制事件」且距上次
+   登记超过 3 秒回声窗口才作为「用户重申」放行(覆盖清空后重推、重复复制); 轮询兜底 /
+   亮屏 / 唤醒脉冲等观察型触发对未变化内容一律静默;
+3. **回声抑制**: 收到远端内容先登记再写入, 随后写入触发的本地剪贴板事件命中
+   「同文本 + 窗口内」被跳过;
+4. **时钟裁决**: 手机端收到 `lamport_clock ≤ lastSeen` 的事件直接丢弃(双通道重复投递
+   幂等 + 在途旧事件保护); 电脑端 `/sync` 响应回带分配的时钟, 手机端据此追赶。
 
 ## Windows 端 HTTP 端点(端口 18236)
 
@@ -28,8 +48,8 @@ hash      = SHA-256(text)                  # 防回环与完整性校验
 | :--- | :--- | :--- | :--- | :--- |
 | `/ping` | GET | 心跳与设备探测 | - | `{"status":"ok","device_name":…}` |
 | `/auth` | POST | PIN 码握手 | `{"pin":"123456","pin_hash":…}` | 匹配 `200`,失败 `403` |
-| `/events` | GET | SSE 长连接(手机主动出站) | 头 `Accept: text/event-stream` | `data: {"type":"CLIP_SYNC","encrypted":…,"hash":…}` |
-| `/sync` | POST | 手机向电脑提交密文 | `{"encrypted":…,"hash":…,"sender_id":…,"sender_name":…}` | `{"status":"ok"}` |
+| `/events` | GET | SSE 长连接(手机主动出站) | 头 `Accept: text/event-stream` | `data: {"type":"CLIP_SYNC","encrypted":…,"sender_id":…,"lamport_clock":N}` |
+| `/sync` | POST | 手机向电脑提交密文 | `{"encrypted":…,"hash"?,"sender_id":…}` | `{"status":"ok","lamport_clock":N}`(时钟供手机端追赶, 丢弃在途旧事件) |
 | `/heartbeat` | POST | 手机端保活并刷新设备表 | `{"pin_hash":…,"device_id":…,"device_name":…,"device_brand":…}` | `{"status":"ok"}` |
 | `/disconnect` | POST | 手机端主动断开,立即摘除该设备在电脑端的连接状态 | `{"pin_hash":…,"device_id":…}` | `{"status":"ok"}` |
 
@@ -93,6 +113,6 @@ Android 端配对成功后主动向电脑发起出站 SSE 长连接,避免国产
 
 ## 剪贴板流转方向
 
-1. **手机 → 电脑**:手机捕获剪贴板变化 → `POST http://<pc-ip>:18236/sync`(密文)→ 电脑解密写入本地剪贴板;
-2. **电脑 → 手机**:电脑捕获剪贴板变化 → 推送到已注册的 Peer `http://<phone-ip>:18237/sync` → 手机 Shizuku 静默写入系统剪贴板;
-3. 任一端写入后均按“防回环”规则校验哈希,过滤自反射。
+1. **手机 → 电脑**:手机捕获剪贴板变化 → 记录比对(变化判定/回声窗口)→ `POST http://<pc-ip>:18236/sync`(密文)→ 电脑解密 → 分配时钟并登记 → 写入本地剪贴板(本地变化事件命中记录自动跳过);
+2. **电脑 → 手机**:电脑捕获剪贴板变化 → 记录比对 → 分配时钟 → SSE 广播 + 对等 POST 兜底推送 → 手机时钟裁决(重复投递幂等)→ 登记 → Shizuku 静默写入系统剪贴板;
+3. 任一端程序化写入剪贴板前都先更新同步记录, 随后触发的本地变化事件命中「同文本 + 窗口内」即跳过 —— 防回环不依赖哈希比对。

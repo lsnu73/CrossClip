@@ -120,11 +120,11 @@
 
 ```text
 用户复制 → PrimaryClipChangedListener / Shizuku 监听触发
-        → SyncForegroundService.onLocalClipboardChanged()
-        → 计算 SHA-256 查 recentHashes(60 秒时间窗去重) 命中则跳过
+        → SyncForegroundService.onLocalClipboardChanged(eventSource=true)
+        → 与 knownClipboardText 记录比对(同文本且在 3 秒回声窗口内则跳过)
         → HttpUploader.sendClipboard() → POST /sync (密文)
-        → 电脑端 server.rs 解密 → 校验 hash → 写入系统剪贴板 + 记录 LAST_TEXT_HASH
-        → 电脑端 SSE 广播 FILE_PROGRESS / 直接回推? (不回推, 由电脑端 IS_UPDATING_SELF 抑制)
+        → 电脑端 server.rs 解密 → begin_remote_push 分配 lamport_clock 并登记 SYNC_RECORD
+        → 写入系统剪贴板(随后的本地变化事件命中记录被跳过, 不回推)
 ```
 
 ---
@@ -184,19 +184,34 @@
 **为什么不做中间人防护**: 局域网工具, 威胁模型是「防邻居偷看」而不是「防国家级攻击」。
 过度设计会牺牲零配置体验。**如果你要加证书体系, 请先确认用户真的需要。**
 
-### 3.4 为什么要防回环(两端各自的哈希队列)
+### 3.4 为什么要防回环(同步记录 + 单调时钟 + 回声窗口)
 
-**问题**: A 写入剪贴板 → 同步给 B → B 写入剪贴板 → B 的监听器又触发 → 同步回 A → 死循环。
+**问题**: A 写入剪贴板 → 同步给 B → B 写入剪贴板 → B 的监听器又触发 → 同步回 A → 死循环;
+以及两个孪生痛点: 「清空/删除剪贴板后重新复制同一段旧内容被去重吞掉」(哈希还在窗口内)与
+「接收方刚写入的内容触发的本地事件被再次推送」(回声)。
 
-**解法**: 双端各自维护一个「最近发送内容哈希」的环形队列:
-- Windows: `clipboard.rs` 的 `LAST_TEXT_HASH` + `IS_UPDATING_SELF` 原子标志
-  (自己写剪贴板前置位, 写完清除, 监听回调看到置位就直接返回);
-- Android: `SyncForegroundService.recentHashes`(`LinkedHashMap<String, Long>`, 最多 50 条,
-  **每条只保留 60 秒**) —— 判重只看时间窗内: 回环反射/监听双发都在秒级, 而用户几分钟后
-  重新复制同一段内容是合法诉求(电脑端剪贴板可能早已改变), 必须放行;
-  被去重跳过时会打 `CLIP_DETECT` 日志, 不是无声丢弃。
+**解法**(2026-09 剪贴板算法重构, 状态收敛为「一条记录 + 一个单调时钟」):
 
-**新增任何「写入剪贴板」的代码路径时, 都必须把内容哈希塞进这个队列**, 否则回环会立刻出现。
+- **登记先行**: 任何「程序化写入剪贴板」的路径(远端来文 / PIN 码复制)都必须**先**更新
+  同步记录再写入 —— Windows 端 `clipboard.rs` 的 `SYNC_RECORD`(`set_clipboard_text`
+  内部刷新 text/updated_at; 远端来文走 `begin_remote_push`), Android 端
+  `SyncForegroundService.onNetworkTextReceived` 的 `knownClipboardText`。随后写入触发的
+  本地剪贴板事件读到「同文本 + 新鲜」直接跳过, 回环从根上不存在;
+- **单调时钟**: 电脑端(hub)为每条受理内容分配 `lamport_clock`(+1, 持久化进 config.json),
+  随消息下发; 手机端收到时钟不前进的事件直接丢弃 —— SSE 与 HTTP 兜底双通道重复投递
+  同一条内容天然幂等, 在途旧事件(慢投递)也不会覆盖更新的复制。`/sync` 响应回带时钟,
+  手机端追赶后可正确丢弃与自己刚推送内容冲突的更旧事件;
+- **回声窗口(3 秒)**: 用户重申同一段内容(清空后重推/重复复制)与回声/监听双发在内容上
+  不可区分, 只能靠时间区分 —— 触发链爆发期在毫秒~2 秒内, 故窗口取 3 秒
+  (`ECHO_SUPPRESS_WINDOW_MS`): 同文本 + 窗口内跳过; 同文本 + 窗口过期 + **真实复制事件**
+  (WM_CLIPBOARDUPDATE / 原生监听)放行; **观察型触发**(2 秒轮询兜底 / 亮屏 / 唤醒脉冲)
+  对未变化内容一律静默, 绝不把旧内容重推给对端覆盖其剪贴板;
+- 旧方案的 `LAST_TEXT_HASH`(单哈希, 吞掉「PC 刚同步入的内容用户再复制一次」)、
+  `IS_UPDATING_SELF` 全局标志(与轮询线程有竞态)、60 秒 `recentHashes` 窗口(吞掉合法
+  重复复制)均已删除。
+
+**新增任何「写入剪贴板」的代码路径时, 都必须先更新同步记录再写入**, 否则回环会立刻出现;
+新增触发源时必须区分「真实复制事件」与「观察型触发」并正确传入 `eventSource`。
 
 ### 3.5 为什么文件传输要分块 + 二进制 body
 
@@ -481,7 +496,8 @@ key         = SHA-256(pin_code)                       # 6 位数字, 两端各�
 nonce       = random(12 bytes)
 密文(文本)   = base64( nonce || AES-256-GCM(key, nonce, utf8(text)) )   # 剪贴板/控制类
 密文(文件块) =        nonce || AES-256-GCM(key, nonce, chunk_bytes)      # 二进制直传, 无 Base64
-hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
+hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)   # 兼容字段
+lamport_clock = hub 分配的单调时钟                              # 仅剪贴板同步消息携带
 ```
 
 > **注意**: 剪贴板走 Base64(因为要放进 JSON), 文件块**不走 Base64**(直接作为 HTTP body)。
@@ -592,6 +608,7 @@ hash        = SHA-256(plaintext)  或  SHA-256(整个文件, 流式)
 | 19 | 选择列表里选了第三方管理器(如 MT「定位所在位置」), 日志显示「已调起」但手机毫无反应; 给候选补上 grant flag 后更严重: `startActivity` 直接抛 `SecurityException: UID does not have permission to content://...`, 连系统「文件」都打不开 | 默认目录的 document URI 是 `buildDocumentUri` **字符串合成**的, 本应用对它没有 SAF 授权(写 `Download/CrossClip` 走 Android 11 的 File API 豁免通道, 与 SAF URI 授权体系**完全无关**)。而 `FLAG_GRANT_READ_URI_PERMISSION` 只能**转发调用方自己持有**的访问权: 不带 flag → 第三方应用拿到 URI 无权读、静默退出(特权组件 DocumentsUI 不受限, 所以只有它能开); 带 flag → 系统做发送方校验, 我们不持有授权 → 对所有目标抛 SecurityException(与目标是谁无关) | 默认目录候选**不带** flag(只能指望特权系统组件); 自定义目录(SAF `takePersistableUriPermission` 已持有授权)候选**必须带** flag, 第三方管理器因此可正常打开; `launchDirWith` 对 SecurityException 再兜一层「剥 flag 重试」防 ROM 校验差异。第三方要访问默认目录的正规出路: 引导用户把保存目录设为「自定义目录」并选同一文件夹(SAF 授权), 文件落点不变。教训: **grant flag 不是万金油 —— 自己没授权的 URI, 加 flag 反而把能用的路径也炸掉;「调起成功」≠「打开成功」** |
 | 20 | 按引导把 Download/CrossClip 设为自定义目录(SAF 授权)后, 第三方管理器**仍然**打不开: 发送方校验已通过(startActivity 不再抛异常), 日志「已调起」但对端依旧静默退出 | 自定义目录候选外发的是**裸 tree URI**(`.../tree/primary:Download/CrossClip`, SAF 目录授权的原生形态): tree URI 只有 DocumentsContract 的 tree API 认识, 第三方管理器按 document 形态解析(`getDocumentId` 要求路径含 `/document/` 段)直接抛异常退出; 发送方持有授权所以不炸我们这边, 日志全程绿灯 | 外发前用 `buildDocumentUriUsingTree(treeUri, getTreeDocumentId(treeUri))` 转成**内嵌 tree 前缀的 document URI**(即 `saveToCustomDir` 写文件已在用的形态), 授权照常随 flag 转发, document 路径才是各管理器认识的样子。教训: **tree URI 只在自己进程内用; 出进程必须转成 document URI** |
 | 21 | 自绘「打开保存目录」选择列表(三 MIME 并集 + 图标列表 + 自记默认应用)在 #18/#19/#20 三层逐个排障后, 第三方管理器对显式组件调起仍可能静默退出; 对照 LocalSend(实测其「打开目录」弹完整系统列表且第三方可开)发现差异只在「显式 vs 隐式」 | LocalSend 的实现(`FileOpener.openUri`): 只发**隐式** VIEW Intent(document URI + 目录 MIME + grant flag), 候选枚举/图标/记住默认全部交给系统 resolver —— resolver 在系统侧解析, 不受本应用包可见性约束, 「仅此一次/总是」原生支持; 显式 setComponent 调起则把解析责任留在对端, 对端解析失败我们无感知 | 对齐 LocalSend: 自定义目录 → 隐式 Intent 交系统「打开方式」(长按用 `createChooser` 强制重选, grant 照常转发); 默认目录 → 直接显式调起 DocumentsUI(唯一特权可开者); 整体删除自绘选择器/三 MIME 探测/自记默认全套机制。教训: **能在系统层解决的事(选应用/记默认)不要在应用层重造; 排障排到第三层仍不通, 优先怀疑方案本身而非继续打补丁** |
+| 22 | 剪贴板同步三处旧疾: ① PC 刚同步入的内容用户再复制一次被吞(LAST_TEXT_HASH 单哈希命中); ② 清空剪贴板后重复制同一段内容被吞(手机端 recentHashes 60 秒窗口未过期); ③ 亮屏/唤醒脉冲把数小时前收到的旧剪贴板内容重推给对端, 覆盖用户正在使用的复制 (观察型触发绕过内容判断直接推送) | 哈希窗口模型把「回声/重复触发」「用户重申」两类语义不同的事件混在一个 60 秒时间窗里判定, 窗口取短则吞合法重申、取长则漏回声; 单哈希更是连「接收后再复制」都分不清 | 重构为「同步记录 + 单调时钟 + 3 秒回声窗口」(见 §3.4): 程序化写入前先登记记录实现回声抑制; hub 分配 lamport_clock 使重复投递幂等; 「同文本 + 窗口过期 + 真实复制事件」才放行用户重申, 观察型触发(轮询/亮屏/脉冲)对未变化内容一律静默。教训: **去重必须区分「事件语义」(回声/补漏/用户意图), 时间窗只该盖住触发链爆发期; 观察型触发只补漏不重推** |
 | 22 | #21 对齐后选择列表仍比 LocalSend 的少得多: LocalSend 的「打开方式」横跨十几页(MT 全家桶、微信、网盘), 我们只匹配到少数注册目录 MIME 的应用 | 扒 LocalSend 完整源码发现「打开目录」走的根本不是原生 `FileOpener.openUri`, 而是 `open_folder.dart` → `open_file` 插件(`open_file_android-1.1.0`, OpenFilePlugin.startActivity + FileUtil): ① 用**自己的 FileProvider** 把目录真实路径转成 content URI(`<authority>/external-path/storage/emulated/0/Download`, path 内嵌绝对路径, MT「定位所在位置」正是靠还原它定位的); ② 目录无扩展名, 插件扩展名表兜底为 **`*/*`** —— resolver 因此列出所有「能看任意内容」的应用; ③ `grantUriPermission` 对全部 resolver **逐个预授权**(读写), intent 上再加 grant flag; ④ 隐式调起。我们此前发的是 `vnd.android.document/directory` 窄口径 + 无授权的合成 document URI, 三样全不沾 | 完整照抄: `resolveOpenableDirPath`(默认目录路径 / `primary:xxx` tree ID 还原绝对路径) → FileProvider(file_paths 补 `<external-path path="."/>`, name 也用 `external-path` 保证管理器路径还原兼容) → `ACTION_VIEW + CATEGORY_DEFAULT + *//* + GRANT_READ\|WRITE` → `grantToResolvers` 逐应用预授权 → 隐式调起。二级存储(SDCard)自定义目录还原不了路径时退回 SAF document URI 通道。教训: **「照抄」要抄到源码层 —— 只从界面行为倒推的实现(#21)会漏掉 FileProvider/`*/*`/预授权三个关键细节** |
 
 ---

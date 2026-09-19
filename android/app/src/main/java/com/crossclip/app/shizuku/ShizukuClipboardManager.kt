@@ -386,6 +386,10 @@ object ShizukuClipboardManager {
 
     /**
      * 通过 Shizuku Shell 特权读取系统剪贴板内容。
+     *
+     * 只取 `item.text`（真纯文本）。刻意**不做** `coerceToText` 降级：
+     * 复制图片/文件时剪贴板里是 URI 或 Intent，coerce 会把它们转成文本推给电脑，
+     * 违反「仅同步纯文本、非文本内容不做同步」的范围约束。
      */
     fun readClipboard(): String? {
         val pair = getIClipboard() ?: return null
@@ -394,8 +398,7 @@ object ShizukuClipboardManager {
         return try {
             val result = invokeIClipboardMethod(invokeClass, proxy, METHOD_GET, skipNullResult = true)
             if (result is ClipData && result.itemCount > 0) {
-                val item = result.getItemAt(0)
-                val text = item.text?.toString() ?: item.coerceToText(null)?.toString()
+                val text = result.getItemAt(0).text?.toString()
                 if (!text.isNullOrEmpty()) {
                     DebugLogger.log("Shizuku", "后台读取成功 (长度 ${text.length})")
                     return text
