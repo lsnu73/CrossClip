@@ -146,6 +146,10 @@
   别把它挪进线程池, 否则 16 个长连接就能耗尽整个服务。
 - 手机端 `SseClient` 断开后 2 秒自动重连, 403(PIN 错误)则停止重试 —— 这个区别很重要,
   否则 PIN 错了会无限重连打爆电脑端。
+- 重连循环受 `shouldAutoRetry` 门控(与 §3.8 搜索窗口同开同关): 搜索已停止且未连接时
+  **退出重连循环**, 不再对着关机的电脑空转; 恢复靠用户「重新扫描」→ 重新握手 → `connect()`。
+- SSE 重连成功**不等于连接状态完整**: 若 `currentPcIp` 为空(握手状态缺失), 必须先补握手
+  再转正 connectionState(§3.16), 否则就是「电脑→手机单通」的状态分裂(§7 #24)。
 
 ### 3.2 为什么要接入 Shizuku
 
@@ -279,6 +283,11 @@
 
 **掉线重连也要重置计时**(`onPcDisconnected() → restartAutoSearchWindow()`),
 否则「连上过又掉线」会沿用旧的时间窗直接放弃搜索。
+
+**这张窗口同样约束 SSE 自动重连**(`SseClient.shouldAutoRetry` 门控, §7 #25):
+搜索窗口关闭且未连接时, SSE 重连循环必须退出 —— 否则会出现「扫描已按设计停止、
+SSE 却整夜每 2 秒对关机的电脑空转重连, 早上电脑一开机就秒连」的行为,
+既违背省电承诺, 秒连还会绕过握手直接制造状态分裂(§3.16)。
 
 **推论**: 新增后台轮询任务时, 请照这个模式设计「能停、能降频」, 不要写死循环。
 
@@ -426,6 +435,40 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
   防止自动关闭前点击打开的是**上一轮**传输的旧目录;
 - 打开失败(返回值 ≤ 32)只打日志不弹窗: 浮窗是尽力而为的辅助功能, 不能打扰主流程。
 
+### 3.16 为什么 SSE 自动重连后必须补握手(状态分裂教训)
+
+**问题**: 电脑夜间关机、早上开机后, 手机端页面同时显示「● 已连接」和「未连接设备」;
+电脑→手机剪贴板/文件正常, 手机→电脑全灭; 电脑端托盘显示「已连接手机: 安卓手机」
+而不是真实品牌(如 vivo)。
+
+**根因**: 连接状态其实由**两份独立变量**表达 —— `connectionState`(SSE 长连接是否存活)
+与 `currentPcIp/currentPcName`(只在握手 `verifyPin → /auth` 成功时赋值)。完整链路是:
+扫描发现 → 握手转正(写入 IP/名称/持久化) → 发起 SSE。但 **SSE 自动重连线程在电脑
+重新开机后直接复活长连接、跳过了握手**。叠加两个帮凶:
+
+1. 电脑关机 → SSE 断开 → `connectionState=0` → 看门狗每 2 分钟触发
+   `loadPreferences` 清空 `currentPcIp`(断开态允许清空);
+2. 扫描 15 分钟超时停止, 没有任何发现路径会再触发握手。
+
+于是早上 SSE 秒连后只剩 `connectionState=1`, `currentPcIp` 为空:
+- 手机→电脑: `doBroadcastText` / `sendTextManual` / 分享文件全部被空 IP 拦截;
+- 心跳: `sendHeartbeatThrottled` 直接 return, 电脑端收不到任何身份上报;
+- 电脑端: `/events` 建连时只有**占位注册**(id=android_phone, name=安卓手机, 品牌空),
+  真实身份本该由 `/auth` 或 `/heartbeat` 刷新 —— 两路都不来, 托盘永远是「安卓手机」;
+- UI: hero 卡片标签读 `connectionState`(已连接), 设备名/IP 读 `currentPcName/currentPcIp`
+  (未连接), 同屏矛盾。
+
+**解法**(两端各一半, 缺一不可):
+- `loadPreferences` 仅在 `connectionState != 1` 时才清空 `currentPcIp` —— 治「连接中
+  被看门狗清空」(§7 #24, 2.5.0 首修, 只治了这一半所以没修好);
+- `onConnectionChanged(true)` 发现 `currentPcIp` 为空(或与 SSE 实际连上的地址不符)时,
+  从 `SseClient.activeUrl` 反解目标地址**补一次 `/auth` 握手**, 成功才按自动握手路径
+  同一套赋值原子转正 —— 顺带把真实设备身份上报给电脑端刷新托盘(§7 #24)。
+
+**推论**: 「长连接自动重连」类机制复活的不只是传输通道, 还有**连接的语义状态**。
+任何「已连接」判定都必须同时校验握手派生的完整状态(单一真相来源, §3.13 的手机端镜像);
+重连路径与首次连接路径必须收敛到同一套状态赋值, 不允许旁路。
+
 ---
 
 ## 4. 模块职责地图
@@ -462,7 +505,7 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 | `network/FileUploader.kt` | 手机→电脑文件发送(分块+加密+进度), 带 `file_hash`, 电脑端已有该文件时整个跳过上传 | `CHUNK_SIZE`、二进制帧格式 |
 | `network/FileReceiver.kt` | 电脑→手机文件接收(临时文件+校验+落盘), **同名+同大小+同哈希去重** | `SaveDirManager` |
 | `network/HttpUploader.kt` | 剪贴板密文、心跳上报、**主动断开时向电脑端发的 `POST /disconnect` 告别请求** | 协议字段; 该请求是「尽力而为」, 失败静默, 由 §3.13 的两条兜底路径接管 |
-| `network/SseClient.kt` | 出站长连接客户端 | 重连策略 |
+| `network/SseClient.kt` | 出站长连接客户端, `activeUrl` 暴露实际连上的地址(供补握手反解) | 重连策略受 `shouldAutoRetry` 门控(§3.8/§3.16) |
 | `network/LanDiscovery.kt` | UDP 广播、子网并发探测、**自动搜索降频状态机** | 耗电表现 |
 | `network/NsdHelper.kt` | mDNS 发现 + HTTP 探活过滤幽灵缓存 | 发现成功率 |
 | `crypto/CryptoUtil.kt` | 与 Rust `crypto.rs` **逐字节对称** | 改一端必须改另一端 |
@@ -612,6 +655,8 @@ lamport_clock = hub 分配的单调时钟                              # 仅剪�
 | 22 | 剪贴板同步三处旧疾: ① PC 刚同步入的内容用户再复制一次被吞(LAST_TEXT_HASH 单哈希命中); ② 清空剪贴板后重复制同一段内容被吞(手机端 recentHashes 60 秒窗口未过期); ③ 亮屏/唤醒脉冲把数小时前收到的旧剪贴板内容重推给对端, 覆盖用户正在使用的复制 (观察型触发绕过内容判断直接推送) | 哈希窗口模型把「回声/重复触发」「用户重申」两类语义不同的事件混在一个 60 秒时间窗里判定, 窗口取短则吞合法重申、取长则漏回声; 单哈希更是连「接收后再复制」都分不清 | 重构为「同步记录 + 单调时钟 + 3 秒回声窗口」(见 §3.4): 程序化写入前先登记记录实现回声抑制; hub 分配 lamport_clock 使重复投递幂等; 「同文本 + 窗口过期 + 真实复制事件」才放行用户重申, 观察型触发(轮询/亮屏/脉冲)对未变化内容一律静默。教训: **去重必须区分「事件语义」(回声/补漏/用户意图), 时间窗只该盖住触发链爆发期; 观察型触发只补漏不重推** |
 | 22 | #21 对齐后选择列表仍比 LocalSend 的少得多: LocalSend 的「打开方式」横跨十几页(MT 全家桶、微信、网盘), 我们只匹配到少数注册目录 MIME 的应用 | 扒 LocalSend 完整源码发现「打开目录」走的根本不是原生 `FileOpener.openUri`, 而是 `open_folder.dart` → `open_file` 插件(`open_file_android-1.1.0`, OpenFilePlugin.startActivity + FileUtil): ① 用**自己的 FileProvider** 把目录真实路径转成 content URI(`<authority>/external-path/storage/emulated/0/Download`, path 内嵌绝对路径, MT「定位所在位置」正是靠还原它定位的); ② 目录无扩展名, 插件扩展名表兜底为 **`*/*`** —— resolver 因此列出所有「能看任意内容」的应用; ③ `grantUriPermission` 对全部 resolver **逐个预授权**(读写), intent 上再加 grant flag; ④ 隐式调起。我们此前发的是 `vnd.android.document/directory` 窄口径 + 无授权的合成 document URI, 三样全不沾 | 完整照抄: `resolveOpenableDirPath`(默认目录路径 / `primary:xxx` tree ID 还原绝对路径) → FileProvider(file_paths 补 `<external-path path="."/>`, name 也用 `external-path` 保证管理器路径还原兼容) → `ACTION_VIEW + CATEGORY_DEFAULT + *//* + GRANT_READ\|WRITE` → `grantToResolvers` 逐应用预授权 → 隐式调起。二级存储(SDCard)自定义目录还原不了路径时退回 SAF document URI 通道。教训: **「照抄」要抄到源码层 —— 只从界面行为倒推的实现(#21)会漏掉 FileProvider/`*/*`/预授权三个关键细节** |
 | 23 | 手机改用 SAF 自定义保存目录后, 电脑端重发同一文件不再跳过(默认目录下会跳过), 手机侧重复落盘为 `a (2).apk` 等副本 | `FileReceiver.findExistingDuplicate` 以「SAF 列举子项并逐个读取代价高、收益不成正比」为由对自定义目录直接 `return null` 放弃去重; 但该理由把去重误判为「全目录遍历逐个哈希」—— 真实成本模型只是「按精确同名定位**单个**候选 + 同大小才流式算一次哈希」, 与落盘时 `queryChildNames` 重名规避同量级 | 自定义目录改走 `SaveDirManager.findCustomDirChild`(一次 children 查询取回 名称/大小/文档ID) 定位候选, `CryptoUtil.computeHashStream`(从 `computeHashFile` 抽出的流式核心) 对 `openInputStream` 算哈希, 两种目录模式判定语义(同名+同大小+同哈希)完全一致; SAF 查询/授权异常一律按未命中处理, 最坏只是多传一次。教训: **否决方案前先把成本模型算准 —— 「遍历目录」和「按名定位单个候选」差着量级; SAF 的等价物往往与 File API 同构** |
+| 24 | 电脑夜间关机、早上开机后: 手机页面同时显示「已连接」和「未连接设备」, 电脑→手机单通、手机→电脑全灭, 托盘显示「安卓手机」而非真实品牌 | 连接状态由 `connectionState`(SSE 存活)与 `currentPcIp`(握手赋值)两份变量表达, **SSE 自动重连线程复活长连接时跳过了握手**: 夜间看门狗周期性 `loadPreferences` 清空 `currentPcIp`(断开态允许) + 扫描 15 分钟超时停止(没有发现路径再触发握手), 早上 SSE 秒连只剩半套状态。2.5.0 首修只治了「loadPreferences 不在连接中清空」这一半, 没堵住重连旁路 | `onConnectionChanged(true)` 发现握手状态缺失(currentPcIp 为空或与 SSE 实际地址不符)时, 从 `SseClient.activeUrl` 反解地址补一次 `/auth` 握手, 成功才按自动握手路径同一套赋值原子转正(§3.16); 403 则断开回到搜索态。教训: **自动重连复活的不只是传输通道, 还有连接的语义状态; 重连路径与首次连接路径必须收敛到同一套状态赋值, 「已连接」判定必须同时校验握手派生状态** |
+| 25 | 自动搜索按设计 15 分钟超时停止了, 手机却整夜每 8 秒对关机的电脑发起 SSE 重连, 早上电脑一开机就被秒连(绕过握手, 直接撞进 #24 的状态分裂) | `SseClient` 的重连循环是独立的 `while` 死循环, 不知道 LanDiscovery 的「5 分钟降频 / 15 分钟停止」省电窗口; 扫描停了它还在转, 既违背「停止后等待手动触发」的设计承诺, 又整夜空转耗电, 还让秒连绕过握手成为状态分裂的入口 | `SseClient` 增加 `shouldAutoRetry` 门控, 服务端传「已连接 或 搜索进行中」; 搜索窗口关闭且未连接时重连循环退出, 恢复靠用户「重新扫描」→ 重新握手 → `connect()`(§3.8/§3.16)。教训: **同类「重试/保活」后台任务必须与对应的主任务共享同一张省电闸门, 各写各的死循环就是在拆省电策略的台** |
 
 ---
 

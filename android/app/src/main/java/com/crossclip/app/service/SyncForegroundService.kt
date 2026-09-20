@@ -136,6 +136,12 @@ class SyncForegroundService : Service() {
          */
         private const val HEARTBEAT_MIN_GAP_MS = 25_000L
 
+        /** SSE 补握手（restoreHandshakeAfterSseReconnect）单轮最多重试次数 */
+        private const val HANDSHAKE_BACKFILL_MAX_RETRY = 2
+
+        /** SSE 补握手重试间隔 */
+        private const val HANDSHAKE_BACKFILL_RETRY_DELAY_MS = 15_000L
+
         @Volatile
         var instance: SyncForegroundService? = null
             private set
@@ -224,6 +230,10 @@ class SyncForegroundService : Service() {
     /** 最近一次真正发出心跳上报的时间戳：定时线程与唤醒脉冲共用，用于统一节流去重 */
     @Volatile
     private var lastHeartbeatSentAt = 0L
+
+    /** 最近一次「状态分裂」告警时间：同一告警 60 秒内只记一条，避免心跳脉冲刷屏 */
+    @Volatile
+    private var lastSplitStateWarnAt = 0L
 
     /** 最近一次上报的接收进度百分比，用于通知节流（-1 表示尚未开始） */
     @Volatile
@@ -427,7 +437,20 @@ class SyncForegroundService : Service() {
      *    （此时距上次上报已超过节流窗口），电脑端不会把手机误判为离线。
      */
     private fun sendHeartbeatThrottled() {
-        if (currentPcIp.isEmpty() || pinCode.isEmpty()) return
+        if (currentPcIp.isEmpty() || pinCode.isEmpty()) {
+            // 状态分裂哨兵：正常流程下「已连接」必然伴随握手得到的 currentPcIp。
+            // 若出现 connectionState=1 但 currentPcIp 为空，说明有路径绕过握手直接
+            // 置位了连接状态（历史上是 SSE 自动重连，见 restoreHandshakeAfterSseReconnect），
+            // 此刻手机→电脑全部发送都会被拦截、电脑端也收不到任何身份上报 —— 立刻留证。
+            if (connectionState == 1 && System.currentTimeMillis() - lastSplitStateWarnAt > 60_000L) {
+                lastSplitStateWarnAt = System.currentTimeMillis()
+                DebugLogger.warn(
+                    "HEARTBEAT",
+                    "检测到状态分裂: connectionState=1 但 currentPcIp 为空，心跳无法上报 (pin.len=${pinCode.length})"
+                )
+            }
+            return
+        }
         val now = System.currentTimeMillis()
         if (now - lastHeartbeatSentAt < HEARTBEAT_MIN_GAP_MS) return
         lastHeartbeatSentAt = now
@@ -569,9 +592,22 @@ class SyncForegroundService : Service() {
             sp.getString("pin_code_$currentTargetDeviceId", "") ?: ""
         } else ""
         pinCode = if (devPin.isNotEmpty()) devPin else (sp.getString("pin_code", "") ?: "")
-        currentPcIp = ""
-        currentPcName = "未连接"
-        DebugLogger.log("SVC_CONFIG", "加载配置: targetId=$currentTargetDeviceId, hintIp=$lastSavedPcIp, port=$currentHttpPort, pin.len=${pinCode.length}, autoSync=$autoSync")
+        // 睡眠唤醒 / 看门狗会周期性触发 onStartCommand → loadPreferences；若当前仍处于
+        // 已连接状态，绝不能清空 currentPcIp / currentPcName，否则会出现
+        // 「connectionState=1 但发不出去」的状态分裂（夜间电脑关机后看门狗每 2 分钟
+        // 清一次，早上 SSE 重连一成功就撞上空 IP，手机→电脑全灭、托盘退化为占位身份）。
+        // 注意这只治「被清空」的一半；「SSE 自动重连不经过握手」的另一半
+        // 由 onConnectionChanged(true) 里的补握手逻辑兜住（restoreHandshakeAfterSseReconnect）。
+        if (connectionState != 1) {
+            currentPcIp = ""
+            currentPcName = "未连接"
+        }
+        DebugLogger.log(
+            "SVC_CONFIG",
+            "加载配置: targetId=$currentTargetDeviceId, hintIp=$lastSavedPcIp, port=$currentHttpPort, " +
+                "pin.len=${pinCode.length}, autoSync=$autoSync, state=$connectionState, " +
+                "pcIp=${if (currentPcIp.isEmpty()) "(空)" else currentPcIp}"
+        )
     }
 
     private fun initNetwork() {
@@ -589,11 +625,33 @@ class SyncForegroundService : Service() {
                 }
             },
             onConnectionChanged = { connected ->
-                DebugLogger.log("SVC_NET", "SSE 连接状态变更: connected=$connected")
+                DebugLogger.log(
+                    "SVC_NET",
+                    "SSE 连接状态变更: connected=$connected, state=$connectionState, " +
+                        "pcIp=${if (currentPcIp.isEmpty()) "(空)" else currentPcIp}, url=${sseClient.activeUrl}"
+                )
                 if (connected) {
-                    connectionState = 1
-                    lanDiscovery.isConnected = true
-                    mainHandler.post { updateNotification(statusTextForNotification()) }
+                    val url = sseClient.activeUrl
+                    // SSE 连上 ≠ 连接状态完整：currentPcIp/currentPcName 只在握手（verifyPin →
+                    // /auth）成功时赋值，而 SSE 自动重连线程直接复活长连接、不经过握手。
+                    // 典型场景：夜间电脑关机 → 扫描停止、看门狗清空 currentPcIp → 早上电脑
+                    // 开机 SSE 秒连 → 只置 connectionState=1。后果是状态分裂：电脑→手机单通，
+                    // 手机→电脑全灭（发送被空 IP 拦截），心跳不再上报，电脑端对等节点永远
+                    // 停留在 /events 建连时的占位身份「安卓手机」。此处一旦发现握手状态缺失
+                    // （或 SSE 实际连上的地址与记录不符），先补一次握手再转正。
+                    val urlHost = try {
+                        android.net.Uri.parse(url).host
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (currentPcIp.isEmpty() || (urlHost != null && urlHost != currentPcIp)) {
+                        connectionState = -1
+                        restoreHandshakeAfterSseReconnect(url, 0)
+                    } else {
+                        connectionState = 1
+                        lanDiscovery.isConnected = true
+                        mainHandler.post { updateNotification(statusTextForNotification()) }
+                    }
                 } else {
                     // 只有「已连接 → 断开」这一次跳变才算真正掉线：
                     // SSE 重连失败会反复回调 false，若每次都重置搜索时间窗，省电策略就失效了
@@ -634,6 +692,12 @@ class SyncForegroundService : Service() {
                         }
                     }
                 }
+            },
+            // 自动重连门控与 LanDiscovery 的省电窗口同开同关：
+            // 已连接时始终允许重连（秒级恢复抖动）；未连接时只跟着搜索窗口走，
+            // 搜索停止（15 分钟超时 / 手动关停）后不再对关机的电脑空转重连、耗电
+            shouldAutoRetry = {
+                connectionState == 1 || (this::lanDiscovery.isInitialized && lanDiscovery.isSearching)
             }
         )
 
@@ -665,6 +729,110 @@ class SyncForegroundService : Service() {
         // （此时尚未 startDiscovery，socket 未创建，该调用是安全的初始化写入）
         lanDiscovery.setAutoSearchEnabled(autoSearchEnabled)
         lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp, manualScan = !autoSearchEnabled)
+    }
+
+    /**
+     * SSE 自动重连成功但握手状态缺失时的补握手（修复「状态分裂」的另一半）。
+     *
+     * 背景：connectionState 只反映「SSE 长连接是否存活」，而 currentPcIp/currentPcName
+     * 只在握手（verifyPin → /auth）成功时赋值。SSE 重连线程在电脑重新开机后直接复活
+     * 长连接、不经过握手 —— 于是出现「connectionState=1 但 currentPcIp 为空」的分裂态：
+     * 电脑→手机单通（SSE 正常），手机→电脑全灭（doBroadcastText / sendTextManual /
+     * ShareReceiveActivity 全部被空 IP 拦截），心跳也不再上报
+     * （sendHeartbeatThrottled 直接 return），电脑端对等节点永远停留在 /events 建连时
+     * 的占位身份「安卓手机」，托盘看不到真实品牌。
+     *
+     * 处理：从 SSE 实际连上的 URL 反解出目标地址，补一次 /auth 握手（顺带把真实
+     * 设备身份上报给电脑端刷新托盘）：
+     * - 成功 → 与自动握手路径同一套赋值原子转正，并持久化；
+     * - 403  → PIN 已失效，断开 SSE 回到搜索态（交由用户重新配对）；
+     * - 其他失败 → 网络抖动（SSE 能连上但 HTTP 不通属罕见），有限次重试后放弃，
+     *   保持未转正状态（UI 如实显示未连接），等下一次 SSE 重连再补。
+     *
+     * @param attempt 本次是第几次重试（0 = 首次，最多 [HANDSHAKE_BACKFILL_MAX_RETRY] 次）
+     */
+    private fun restoreHandshakeAfterSseReconnect(url: String, attempt: Int) {
+        val uri = try {
+            android.net.Uri.parse(url)
+        } catch (_: Exception) {
+            null
+        }
+        val host = uri?.host
+        if (host.isNullOrEmpty()) {
+            DebugLogger.err("SVC_NET", "SSE 补握手失败: 无法从 URL 反解目标地址 ($url)")
+            connectionState = 0
+            return
+        }
+        val port = if (uri.port > 0) uri.port else currentHttpPort
+        val token = connectTokenCounter.incrementAndGet()
+        DebugLogger.log("SVC_NET", "SSE 补握手开始 (第 ${attempt + 1} 次, token=$token): $host:$port")
+        HttpUploader.verifyPin(host, port, pinCode, deviceId, deviceName, deviceBrand) { success, statusCode, devName, retDevId ->
+            if (token != connectTokenCounter.get()) {
+                DebugLogger.log("SVC_NET", "丢弃过期的 SSE 补握手回调 (token: $token)")
+                return@verifyPin
+            }
+            mainHandler.post {
+                if (token != connectTokenCounter.get()) return@post
+                if (success) {
+                    // 握手通过，原子转正为已连接（与 onDeviceDiscovered 自动握手成功同一套状态）
+                    connectionState = 1
+                    lanDiscovery.isConnected = true
+                    currentPcIp = host
+                    currentHttpPort = port
+                    currentPcName = devName ?: "Windows 电脑"
+                    if (!retDevId.isNullOrEmpty()) {
+                        currentTargetDeviceId = retDevId
+                    }
+                    resetClipboardClockBaseline()
+                    val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
+                    sp.edit()
+                        .putString("last_pc_ip", host)
+                        .putString("last_pc_name", currentPcName)
+                        .putInt("last_http_port", port)
+                        .apply()
+                    if (!retDevId.isNullOrEmpty()) {
+                        sp.edit()
+                            .putString("last_device_id", retDevId)
+                            .putString("pin_code_$retDevId", pinCode)
+                            .apply()
+                    }
+                    DebugLogger.ok(
+                        "SVC_NET",
+                        "SSE 补握手成功，连接状态已恢复完整: $currentPcName ($host:$port), 设备ID=$retDevId"
+                    )
+                    updateNotification(statusTextForNotification())
+                } else if (statusCode == 403) {
+                    DebugLogger.err("SVC_NET", "SSE 补握手失败: PIN 码不匹配，断开长连接回到搜索态")
+                    // 先落未连接态再断 SSE：disconnect 会同步回调 onConnectionChanged(false)，
+                    // 其内部用 connectionState == 1 判断是否属于「已连接 → 断开」跳变
+                    connectionState = 0
+                    lanDiscovery.isConnected = false
+                    currentPcIp = ""
+                    currentPcName = "未连接"
+                    sseClient.disconnect()
+                    onPcDisconnected()
+                    updateNotification("PIN 码不匹配，请核对电脑 PIN 码")
+                } else if (attempt < HANDSHAKE_BACKFILL_MAX_RETRY) {
+                    DebugLogger.warn(
+                        "SVC_NET",
+                        "SSE 补握手失败 (statusCode=$statusCode)，${HANDSHAKE_BACKFILL_RETRY_DELAY_MS / 1000} 秒后重试"
+                    )
+                    connectionState = 0
+                    mainHandler.postDelayed({
+                        // 期间若已通过其他路径恢复连接（重新扫描/自动握手），放弃重试
+                        if (connectionState == 1) return@postDelayed
+                        restoreHandshakeAfterSseReconnect(url, attempt + 1)
+                    }, HANDSHAKE_BACKFILL_RETRY_DELAY_MS)
+                } else {
+                    DebugLogger.err(
+                        "SVC_NET",
+                        "SSE 补握手连续 ${attempt + 1} 次失败 (statusCode=$statusCode)，放弃转正，等待下一次 SSE 重连再补"
+                    )
+                    connectionState = 0
+                    updateNotification(statusTextForNotification())
+                }
+            }
+        }
     }
 
     /** 查询自动搜索开关状态（供 UI 显示） */
@@ -1165,7 +1333,11 @@ class SyncForegroundService : Service() {
                 onServerClock = { clock -> updateLastSeenClipboardClock(clock) }
             )
         } else {
-            DebugLogger.log("SVC_SEND", "尚未连接电脑，跳过自动同步")
+            DebugLogger.log(
+                "SVC_SEND",
+                "尚未连接电脑，跳过自动同步 (state=$connectionState, " +
+                    "pcIp=${if (currentPcIp.isEmpty()) "(空)" else currentPcIp}, pin.len=${pinCode.length})"
+            )
             onComplete?.invoke(false)
         }
     }
@@ -1258,6 +1430,10 @@ class SyncForegroundService : Service() {
         if (text.isNotEmpty()) {
             // 手动发送是用户显式意图，不做去重登记（本机剪贴板并未因发送而变化，不会触发回声）
             if (currentPcIp.isEmpty() || pinCode.isEmpty()) {
+                DebugLogger.warn(
+                    "SVC_MANUAL",
+                    "手动发送被拦截: state=$connectionState, pcIp 空=${currentPcIp.isEmpty()}, pin 空=${pinCode.isEmpty()}"
+                )
                 Toast.makeText(applicationContext, "尚未连接电脑，请输入电脑显示的 6 位 PIN 码", Toast.LENGTH_SHORT).show()
                 callback?.invoke(false)
                 return

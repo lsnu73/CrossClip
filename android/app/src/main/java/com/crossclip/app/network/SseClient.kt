@@ -14,7 +14,16 @@ class SseClient(
     // 手机端据此丢弃重复投递（SSE 与 HTTP 兜底双通道各送一次同一条内容）与在途旧事件。
     private val onMessageReceived: (encrypted: String, lamportClock: Long, senderId: String) -> Unit,
     private val onConnectionChanged: (Boolean) -> Unit,
-    private val onFileEvent: ((eventType: String, data: JSONObject) -> Unit)? = null
+    private val onFileEvent: ((eventType: String, data: JSONObject) -> Unit)? = null,
+    /**
+     * 自动重连门控：返回 false 时重连循环立即退出（而不是继续每 2 秒空转）。
+     *
+     * 服务端传「已连接 或 局域网搜索仍在进行」——与 LanDiscovery 的
+     * 「5 分钟降频 / 15 分钟停止」省电策略同一张闸门。搜索窗口已关闭时，
+     * 对着关机的电脑每 2 秒发起一次 TCP 连接纯属白白唤醒射频芯片，
+     * 也正是「夜间已停止扫描、早上电脑一开机却秒连」这种违背省电设计的行为来源。
+     */
+    private val shouldAutoRetry: (() -> Boolean)? = null
 ) {
     private val TAG = "CrossClipSSE"
     @Volatile
@@ -22,6 +31,17 @@ class SseClient(
     private var thread: Thread? = null
     @Volatile
     private var currentCall: Call? = null
+
+    /**
+     * 当前（或最近一次）连接的目标 URL。
+     *
+     * 服务层在 SSE 连接建立但握手状态缺失时（见 SyncForegroundService 的
+     * 补握手逻辑），需要从这里反解出实际连上的电脑地址——SSE 重连线程绕过了
+     * 正常握手流程，服务层并不知道这次连的是谁。
+     */
+    @Volatile
+    var activeUrl: String = ""
+        private set
     // 代际标记：connect/disconnect 都会使其自增。读线程只认自己启动时的那一代，
     // 一旦被取代就静默退出——不上报状态、不处理数据、不重试，杜绝僵尸连接
     private val generation = AtomicInteger(0)
@@ -38,6 +58,7 @@ class SseClient(
     fun connect(url: String) {
         disconnect()
         isClosed = false
+        activeUrl = url
         val myGen = generation.incrementAndGet()
 
         thread = Thread {
@@ -50,6 +71,13 @@ class SseClient(
                 .build()
 
             while (isActive(myGen)) {
+                // 重连门控：搜索窗口已关闭（15 分钟超时 / 自动搜索关停）且当前未连接时，
+                // 停止重连循环。恢复路径由上层负责——用户「重新扫描」或重新握手成功后
+                // 会再次调用 connect() 拉起新一代连接线程。
+                if (shouldAutoRetry?.invoke() == false) {
+                    DebugLogger.log("SSE", "搜索窗口已关闭且未连接，停止 SSE 自动重连（等待用户手动触发）")
+                    break
+                }
                 var call: Call? = null
                 try {
                     call = client.newCall(request)
