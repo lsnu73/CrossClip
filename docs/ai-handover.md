@@ -436,7 +436,7 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 
 | 文件 | 职责 | 改它会牵连 |
 | :--- | :--- | :--- |
-| `main.rs` | 入口、Win32 托盘图标与菜单、单实例互斥、关机广播、右键菜单注册、WM_COPYDATA 接收、文件选择器、文件发送入口(状态反馈走自绘浮窗, 已无气泡通知) | 托盘菜单 ID 常量、`AppState` 字段、`wnd_proc` 分支 |
+| `main.rs` | 入口、Win32 托盘图标与菜单、单实例互斥、关机广播、右键菜单注册、WM_COPYDATA 接收、文件发送入口(状态反馈走自绘浮窗, 已无气泡通知)、托盘菜单「打开日志」 | 托盘菜单 ID 常量、`AppState` 字段、`wnd_proc` 分支 |
 | `server.rs` | HTTP 服务(18236)、SSE、鉴权、**Peer 表的注册与摘除**、`/disconnect` 断开握手、文件收发端点、**向手机发送文件**、接收端去重协商 | 协议、Peer 生命周期(§3.13)、`Broadcaster` |
 | `crypto.rs` | SHA-256 派生、AES-GCM 加密(字符串 / 原始字节 / 流式文件哈希) | **两端必须一致**, 改任一函数都要核对 Android 的 `CryptoUtil.kt` |
 | `file_transfer.rs` | 文件传输状态机、分块读写、临时文件、重名规避、**同名+同大小+同哈希去重** | `CHUNK_SIZE` 必须与手机端一致 |
@@ -447,6 +447,7 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 | `mdns.rs` | mDNS 服务发布(`_crossclip._tcp.local.`) | 与 Android `NsdHelper` 配对 |
 | `progress_window.rs` | **自绘文件传输进度浮窗**(置顶 / 无边框 / 不抢焦点), 接收成功终态可点击打开所在目录(§3.15) | 托盘气泡通知没有进度条能力, 这是唯一能显示进度的途径; 点击跳转必须走 ShellExecuteW 而非硬编码 explorer |
 | `icon.rs` | 从内嵌 `assets/app.ico` 里挑尺寸最接近的条目建 HICON | 必须与 `build.rs` 嵌进 exe 资源的是同一张图 |
+| `logger.rs` | 桌面端日志系统: `crossclip_debug.log`(exe 同级目录), 等级 INFO/OK/WARN/ERR, 5MB 轮转; 统一用 `log_info!/log_ok!/log_warn!/log_err!` 宏, 托盘菜单「打开日志」入口 | 新增诊断信息一律走宏而非 `println!`(GUI 子系统下 println 不可见); 排障时先看日志文件 |
 | `build.rs` + `app.rc` | 用 Windows SDK 的 `rc.exe` 把图标嵌进 exe 资源节(找不到只告警、不中断构建) | 影响 exe 文件自身显示的图标 |
 
 ### 4.2 Android 端 (`android/app/src/main/java/com/crossclip/app/`)

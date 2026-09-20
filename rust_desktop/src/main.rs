@@ -6,6 +6,8 @@
 //! 托盘窗口生命周期、单实例 + WM_COPYDATA 转发、资源管理器右键菜单注册
 //! 等设计背后的原因与改动禁区。
 
+#[macro_use]
+mod logger;
 mod clipboard;
 mod config;
 mod crypto;
@@ -26,7 +28,6 @@ use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::System::DataExchange::*;
 use windows_sys::Win32::System::Registry::*;
 use windows_sys::Win32::System::Threading::*;
-use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -48,7 +49,7 @@ const ID_TRAY_REGEN_PIN: usize = 1004;
 const ID_TRAY_TOGGLE_AUTO: usize = 1005;
 const ID_TRAY_AUTO_START: usize = 1006;
 const ID_TRAY_SEND_MANUAL: usize = 1007;
-const ID_TRAY_SEND_FILE: usize = 1009;
+const ID_TRAY_OPEN_LOG: usize = 1009;
 const ID_TRAY_PHONE: usize = 1010;
 const ID_TRAY_QUIT: usize = 1008;
 
@@ -122,18 +123,10 @@ impl AppState {
         }
     }
 
-    /// 托盘菜单入口：弹出文件选择器，选择后发送到手机
-    pub fn send_file_to_phone(&self) {
-        let file_path = match open_file_picker(self.hwnd as HWND) {
-            Some(p) => p,
-            None => return,
-        };
-        self.send_file_path(&file_path);
-    }
-
     /// 发送指定路径的文件到手机。
-    /// 资源管理器右键菜单（`--send-file` 参数）与托盘菜单共用此入口。
+    /// 资源管理器右键菜单（`--send-file` 参数）共用此入口。
     pub fn send_file_path(&self, path: &str) {
+        log_info!("FILE_SEND", "开始发送文件到手机: {}", path);
         let file_path = path.to_string();
         let file_manager = self.file_manager.clone();
         let broadcaster = self.broadcaster.clone();
@@ -166,11 +159,21 @@ impl AppState {
             let (phone_ip, phone_port) = match phone_peer {
                 Some(p) => (p.ip.clone(), p.port),
                 None => {
+                    log_err!("FILE_SEND", "发送失败: 未找到已连接的手机设备 (peers=0)");
                     progress_window::finish("文件发送失败", "未找到已连接的手机设备", false);
                     file_manager.cleanup_outgoing(&file_id);
                     return;
                 }
             };
+            log_info!(
+                "FILE_SEND",
+                "目标手机: {}:{} (id={}, name={}, brand={})",
+                phone_ip,
+                phone_port,
+                phone_peer.map(|p| p.device_id.clone()).unwrap_or_default(),
+                phone_peer.map(|p| p.device_name.clone()).unwrap_or_default(),
+                phone_peer.map(|p| p.device_brand.clone()).unwrap_or_default()
+            );
 
             let current_pin = pin_code.read().unwrap().clone();
 
@@ -207,6 +210,12 @@ impl AppState {
 
             match send_result {
                 Ok(server::SendOutcome::Sent) => {
+                    log_ok!(
+                        "FILE_SEND",
+                        "文件发送完成: {} ({})",
+                        filename,
+                        progress_window::format_size(file_size)
+                    );
                     progress_window::finish(
                         "文件发送完成",
                         &format!(
@@ -218,6 +227,11 @@ impl AppState {
                     );
                 }
                 Ok(server::SendOutcome::SkippedExisting) => {
+                    log_ok!(
+                        "FILE_SEND",
+                        "手机端已存在相同文件，跳过全部分块: {}",
+                        filename
+                    );
                     progress_window::finish(
                         "已跳过：手机端已有该文件",
                         &format!("{} 内容一致，未重复传输", filename),
@@ -225,6 +239,7 @@ impl AppState {
                     );
                 }
                 Err(e) => {
+                    log_err!("FILE_SEND", "文件发送失败: {} - {}", filename, e);
                     progress_window::finish("文件发送失败", &e, false);
                 }
             }
@@ -397,36 +412,6 @@ fn forward_file_to_existing_instance() -> bool {
     }
 }
 
-/// 打开 Windows 原生文件选择对话框
-fn open_file_picker(hwnd: HWND) -> Option<String> {
-    unsafe {
-        let mut filename_buf = [0u16; 32768]; // 支持长路径
-        let filter = to_wide("所有文件\0*.*\0图片文件\0*.jpg;*.jpeg;*.png;*.gif;*.bmp;*.webp\0文档\0*.txt;*.doc;*.docx;*.pdf\0视频\0*.mp4;*.avi;*.mkv;*.mov\0音频\0*.mp3;*.wav;*.flac;*.aac\0");
-        let title = to_wide("选择要发送到手机的文件");
-
-        let mut ofn: OPENFILENAMEW = std::mem::zeroed();
-        ofn.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
-        ofn.hwndOwner = hwnd;
-        ofn.lpstrFilter = filter.as_ptr();
-        ofn.lpstrFile = filename_buf.as_mut_ptr();
-        ofn.nMaxFile = 32768;
-        ofn.lpstrTitle = title.as_ptr();
-        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-
-        if GetOpenFileNameW(&mut ofn) != 0 {
-            let len = filename_buf.iter().position(|&c| c == 0).unwrap_or(0);
-            let path = String::from_utf16_lossy(&filename_buf[..len]);
-            if !path.is_empty() {
-                Some(path)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }
-}
-
 // 说明：这里原本有一个 show_balloon_tip()（系统托盘气泡通知）。
 // 文件传输的状态呈现统一改走自绘浮窗（progress_window）后它已被删除 ——
 // 系统气泡与浮窗无法合并，两套并存只会把同一件事提示两遍。
@@ -574,6 +559,7 @@ unsafe extern "system" fn wnd_proc(
                     let bytes = std::slice::from_raw_parts(cds.lp_data as *const u8, cds.cb_data as usize);
                     let path = String::from_utf8_lossy(bytes).trim_end_matches('\0').to_string();
                     if !path.is_empty() {
+                        log_info!("FILE_SEND", "收到右键菜单文件发送请求: {}", path);
                         let state_opt = GLOBAL_STATE.lock().unwrap().clone();
                         if let Some(state) = state_opt {
                             state.send_file_path(&path);
@@ -641,6 +627,22 @@ unsafe extern "system" fn wnd_proc(
                         }
                         None => "📱 已连接手机: 无".to_string(),
                     };
+                    // 每次打开托盘菜单都留一条对等节点快照：
+                    // 「已连接手机」显示的是谁、品牌是否为占位身份，是排查状态分裂的第一现场
+                    log_info!(
+                        "TRAY",
+                        "托盘菜单打开, peers={} {}, {}",
+                        peers.len(),
+                        peers
+                            .iter()
+                            .map(|p| format!(
+                                "{{ip={}, id={}, name={}, brand={}}}",
+                                p.ip, p.device_id, p.device_name, p.device_brand
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        phone_str
+                    );
                     let phone_text: Vec<u16> = OsStr::new(&phone_str)
                         .encode_wide()
                         .chain(Some(0))
@@ -682,11 +684,10 @@ unsafe extern "system" fn wnd_proc(
                             .chain(Some(0))
                             .collect();
 
-                    let send_file_text: Vec<u16> =
-                        OsStr::new("📁 发送文件到手机...")
-                            .encode_wide()
-                            .chain(Some(0))
-                            .collect();
+                    let open_log_text: Vec<u16> = OsStr::new("📝 打开日志")
+                        .encode_wide()
+                        .chain(Some(0))
+                        .collect();
 
                     let quit_text: Vec<u16> = OsStr::new("❌ 退出 CrossClip")
                         .encode_wide()
@@ -711,7 +712,7 @@ unsafe extern "system" fn wnd_proc(
                         );
                     }
                     AppendMenuW(hmenu, MF_SEPARATOR, 0, null_mut());
-                    AppendMenuW(hmenu, MF_STRING, ID_TRAY_SEND_FILE, send_file_text.as_ptr());
+                    AppendMenuW(hmenu, MF_STRING, ID_TRAY_OPEN_LOG, open_log_text.as_ptr());
                     AppendMenuW(hmenu, MF_SEPARATOR, 0, null_mut());
                     AppendMenuW(hmenu, MF_STRING, ID_TRAY_QUIT, quit_text.as_ptr());
 
@@ -739,8 +740,9 @@ unsafe extern "system" fn wnd_proc(
                         set_auto_start(!cur);
                     } else if cmd == ID_TRAY_SEND_MANUAL as i32 {
                         state.send_manual();
-                    } else if cmd == ID_TRAY_SEND_FILE as i32 {
-                        state.send_file_to_phone();
+                    } else if cmd == ID_TRAY_OPEN_LOG as i32 {
+                        log_info!("TRAY", "用户点击「打开日志」");
+                        logger::open_log_file();
                     } else if cmd == ID_TRAY_QUIT as i32 {
                         state.broadcaster.disconnect_all();
                         PostQuitMessage(0);
@@ -774,8 +776,17 @@ unsafe extern "system" fn wnd_proc(
 }
 
 fn main() {
+    // 日志系统尽早初始化：之后所有模块的 log_*! 宏都会写入 exe 同级的 crossclip_debug.log
+    logger::init();
+    log_info!(
+        "LOG",
+        "CrossClip 桌面端启动 (版本 {})",
+        env!("CARGO_PKG_VERSION")
+    );
+
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("CrossClip 崩溃: {:?}", info);
+        log_err!("PANIC", "{}", msg);
         let _ = std::fs::write("crossclip_crash.log", msg);
     }));
 
@@ -806,6 +817,14 @@ fn main() {
         .first()
         .cloned()
         .unwrap_or_else(|| "127.0.0.1".to_string());
+    log_info!(
+        "STARTUP",
+        "本机 IP: {}, HTTP 端口: {}, 设备名: {}, 设备 ID: {}",
+        main_ip,
+        cfg.http_port,
+        cfg.device_name,
+        cfg.device_id
+    );
     let auto_sync_arc = Arc::new(AtomicBool::new(cfg.auto_sync));
 
     // 1. 广播器 (用于将电脑剪贴板并发推送到手机)

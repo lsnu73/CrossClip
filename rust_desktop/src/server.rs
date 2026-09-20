@@ -179,6 +179,9 @@ impl Broadcaster {
             .as_secs();
         let mut peers = self.peers.write().unwrap();
         if let Some(existing) = peers.iter_mut().find(|p| p.ip == ip) {
+            let id_before = existing.device_id.clone();
+            let name_before = existing.device_name.clone();
+            let brand_before = existing.device_brand.clone();
             existing.last_seen = now;
             existing.port = port;
             if !device_id.is_empty() {
@@ -190,7 +193,35 @@ impl Broadcaster {
             if !device_brand.is_empty() {
                 existing.device_brand = device_brand;
             }
+            // 身份发生变化（典型：/events 建连时的占位身份「安卓手机」被 /auth 或
+            // /heartbeat 的真实身份刷新）时留一条日志 —— 这是排查「托盘显示安卓手机
+            // 而不是真实品牌」「状态分裂」问题的第一现场
+            if existing.device_id != id_before
+                || existing.device_name != name_before
+                || existing.device_brand != brand_before
+            {
+                log_info!(
+                    "Server",
+                    "对等节点身份刷新: {} id={} name={} brand={} (原: id={} name={} brand={})",
+                    ip,
+                    existing.device_id,
+                    existing.device_name,
+                    existing.device_brand,
+                    id_before,
+                    name_before,
+                    brand_before
+                );
+            }
         } else {
+            log_info!(
+                "Server",
+                "新对等节点注册: {}:{} id={} name={} brand={}",
+                ip,
+                port,
+                device_id,
+                device_name,
+                device_brand
+            );
             peers.push(ClientPeer {
                 ip,
                 port,
@@ -228,14 +259,25 @@ impl Broadcaster {
             .to_string();
 
             // 1. 毫秒级优先推送到所有活跃的 SSE 长连接（手机端直达通道）
+            let peers: Vec<ClientPeer> = self.peers.read().unwrap().clone();
+            let peers_len = peers.len();
             let msg = format!("data: {}\n\n", payload);
+            let sse_clients;
             {
                 let mut clients = self.clients.lock().unwrap();
                 clients.retain(|client| client.send(msg.clone()).is_ok());
+                sse_clients = clients.len();
             }
+            log_info!(
+                "CLIP_SYNC",
+                "广播剪贴板到手机: 长度={}, clock={}, SSE客户端={}, peers={}",
+                text.len(),
+                clock,
+                sse_clients,
+                peers_len
+            );
 
             // 2. 异步向局域网已注册的对等节点做 HTTP POST 兜底通知，不阻塞主流程
-            let peers: Vec<ClientPeer> = self.peers.read().unwrap().clone();
             if !peers.is_empty() {
                 std::thread::spawn(move || {
                     for peer in peers {
@@ -271,7 +313,7 @@ impl Broadcaster {
         let before = peers.len();
         peers.retain(|p| p.ip != ip);
         if peers.len() != before {
-            println!("[Server] 已摘除对等节点: {}", ip);
+            log_info!("Server", "已摘除对等节点: {} (剩余 {} 个)", ip, peers.len());
         }
     }
 }
@@ -295,10 +337,15 @@ fn send_raw_http_post(ip: &str, port: u16, path: &str, json_body: &str) -> bool 
             let _ = stream.flush();
             let mut buf = [0u8; 128];
             let _ = stream.read(&mut buf);
-            return true;
+            true
+        } else {
+            log_warn!("Server", "HTTP 兜底推送失败: {}:{}", ip, port);
+            false
         }
+    } else {
+        log_warn!("Server", "HTTP 兜底推送连接失败: {}:{} (path={})", ip, port, path);
+        false
     }
-    false
 }
 
 /// 在一个已建立的连接上写出一个 HTTP 请求（HTTP/1.1 keep-alive）
@@ -452,8 +499,9 @@ pub fn send_file_to_phone(
     let skipped_existing = prepare_response.contains("\"already_exists\":true");
 
     if skipped_existing {
-        println!(
-            "[FileTransfer] 手机端已存在相同文件，跳过全部分块: {}",
+        log_info!(
+            "FileTransfer",
+            "手机端已存在相同文件，跳过全部分块: {}",
             transfer.filename
         );
     } else {
@@ -530,6 +578,7 @@ pub fn start_http_server(
         let server = match Server::http(&addr) {
             Ok(s) => Arc::new(s),
             Err(e) => {
+                log_err!("HTTP", "无法绑定端口 {}: {}", port, e);
                 eprintln!("[HTTP] 无法绑定端口 {}: {}", port, e);
                 return;
             }
@@ -647,6 +696,7 @@ fn handle_client_request(
                 }
             }
         }
+        log_warn!("HEARTBEAT", "心跳校验失败 (PIN 不匹配): {}", client_ip);
         let resp = Response::from_string(r#"{"status":"error"}"#)
             .with_status_code(StatusCode(403))
             .with_header(cors_header);
@@ -665,6 +715,7 @@ fn handle_client_request(
                 let my_hash = crate::crypto::compute_hash(&current_pin);
                 let my_hash_prefix = &my_hash[..16.min(my_hash.len())];
                 if req.pin_hash.as_deref() == Some(my_hash_prefix) {
+                    log_info!("Server", "手机端主动断开连接: {}", client_ip);
                     broadcaster.unregister_peer(&client_ip);
                     let resp = Response::from_string(r#"{"status":"ok","message":"disconnected"}"#)
                         .with_header(cors_header)
@@ -685,6 +736,7 @@ fn handle_client_request(
         let current_pin = pin_code.read().unwrap().clone();
         let query_pin = extract_pin_from_query(&url).unwrap_or_default();
         if query_pin.trim() != current_pin.trim() {
+            log_warn!("SSE", "SSE 建连被拒 (PIN 不匹配): {}", client_ip);
             let resp_data = serde_json::to_string(&StatusResponse {
                 status: "error".to_string(),
                 auth: Some(false),
@@ -703,6 +755,11 @@ fn handle_client_request(
 
         // clone 而非 move：这个连接结束时还要用同一个 IP 把自己从 peers 里摘掉
         // 此时手机端身份尚未上报，先占位注册，真实名称/品牌由 /auth 与 /heartbeat 刷新
+        log_ok!(
+            "SSE",
+            "手机端 SSE 长连接建立: {} (先占位注册, 真实身份待 /auth 或 /heartbeat 刷新)",
+            client_ip
+        );
         broadcaster.register_peer(client_ip.clone(), 18237, "android_phone".to_string(), "安卓手机".to_string(), String::new());
 
         let (tx, rx) = channel::<String>();
@@ -716,6 +773,7 @@ fn handle_client_request(
         if writer.write_all(response_line.as_bytes()).is_err() {
             // 响应头都没能写出去，这条 SSE 对手机端等于不存在 ——
             // 回滚掉上面刚做的注册，别让托盘凭一个假的连接显示「已连接手机」
+            log_warn!("SSE", "SSE 响应头写出失败, 回滚占位注册: {}", client_ip);
             broadcaster.unregister_peer(&client_ip);
             return;
         }
@@ -734,6 +792,7 @@ fn handle_client_request(
         }
         // SSE 长连接结束 = 手机端不再与电脑相连，就地摘掉对等节点，
         // 让托盘菜单的「已连接手机」与真实状态同步（而不是继续挂 600 秒）。
+        log_info!("SSE", "手机端 SSE 长连接结束: {}", client_ip);
         broadcaster.unregister_peer(&client_ip);
         return;
     }
@@ -809,6 +868,15 @@ fn handle_client_request(
             }
 
             if is_valid {
+                log_ok!(
+                    "AUTH",
+                    "手机端握手成功: {} port={} id={} name={} brand={}",
+                    client_ip,
+                    client_port,
+                    dev_id,
+                    dev_name,
+                    dev_brand
+                );
                 broadcaster.register_peer(client_ip, client_port, dev_id, dev_name, dev_brand);
 
                 let resp_data = serde_json::to_string(&StatusResponse {
@@ -824,6 +892,7 @@ fn handle_client_request(
                     .with_header(content_type);
                 let _ = request.respond(resp);
             } else {
+                log_warn!("AUTH", "手机端握手失败 (PIN 不匹配): {}", client_ip);
                 let resp_data = serde_json::to_string(&StatusResponse {
                     status: "error".to_string(),
                     auth: Some(false),
@@ -861,6 +930,13 @@ fn handle_client_request(
                         let sender = sync_req.sender_id.unwrap_or_else(|| "手机端".to_string());
                         let clock = crate::clipboard::begin_remote_push(&sender, &decrypted);
                         crate::clipboard::set_clipboard_text(&decrypted);
+                        log_ok!(
+                            "SYNC",
+                            "收到手机端剪贴板: 长度={}, sender={}, clock={}",
+                            decrypted.len(),
+                            sender,
+                            clock
+                        );
 
                         on_text_received(decrypted, sender);
 
@@ -925,6 +1001,7 @@ fn handle_client_request(
                         return;
                     }
                     Err(e) => {
+                        log_err!("FileTransfer", "手机端拒绝接收文件 (prepare): {}", e);
                         let resp = serde_json::json!({
                             "status": "error",
                             "message": e
@@ -1007,6 +1084,7 @@ fn handle_client_request(
                 let _ = request.respond(resp);
             }
             Err(e) => {
+                log_err!("FileTransfer", "接收分块失败 (chunk {}): {}", chunk_index, e);
                 let resp = serde_json::json!({
                     "status": "error",
                     "message": e
@@ -1072,6 +1150,7 @@ fn handle_client_request(
                     }
                     Err(e) => {
                         // 失败同样要给出终态，否则浮窗会一直停在半途
+                        log_err!("FileTransfer", "手机端→电脑文件落盘失败: {}", e);
                         crate::progress_window::finish("文件接收失败", &e, false);
                         let resp = serde_json::json!({
                             "status": "error",
