@@ -144,10 +144,11 @@
 **推论(改代码时必须注意)**:
 - 电脑端 `server.rs` 的 SSE 处理跑在**独立线程**上(不是 16 线程的 WorkerPool), 因为它会长期阻塞。
   别把它挪进线程池, 否则 16 个长连接就能耗尽整个服务。
-- 手机端 `SseClient` 断开后 2 秒自动重连, 403(PIN 错误)则停止重试 —— 这个区别很重要,
+- 手机端 `SseClient` 断开后按窗口阶段降频重连(0–5 分钟 2 s / 5–9 分钟 60 s /
+  9–15 分钟 120 s), 403(PIN 错误)则停止重试 —— 这个区别很重要,
   否则 PIN 错了会无限重连打爆电脑端。
-- 重连循环受 `shouldAutoRetry` 门控(与 §3.8 搜索窗口同开同关): 搜索已停止且未连接时
-  **退出重连循环**, 不再对着关机的电脑空转; 恢复靠用户「重新扫描」→ 重新握手 → `connect()`。
+- 重连循环受 `nextRetryDelayMs` 调度(与 §3.8 搜索窗口同一张时间表): 搜索已停止且未连接时
+  返回 null **退出重连循环**, 不再对着关机的电脑空转; 恢复靠用户「重新扫描」→ 重新握手 → `connect()`。
 - SSE 重连成功**不等于连接状态完整**: 若 `currentPcIp` 为空(握手状态缺失), 必须先补握手
   再转正 connectionState(§3.16), 否则就是「电脑→手机单通」的状态分裂(§7 #24)。
 
@@ -275,7 +276,8 @@
 | 已搜索时长 | 行为 |
 | :--- | :--- |
 | 0–5 分钟 | 保持高频(2.5 s 一轮 + 全网段并发探测) |
-| 5–15 分钟 | 降频到每 60 s 一轮 |
+| 5–9 分钟 | 降频到每 60 s 一轮 |
+| 9–15 分钟 | 再降频到每 120 s 一轮 |
 | > 15 分钟 | **停止搜索**, 等待用户手动点「重新扫描」 |
 
 另有「自动搜索」总开关: 关闭后**立即**中断循环并释放 UDP socket 与 MulticastLock;
@@ -284,12 +286,21 @@
 **掉线重连也要重置计时**(`onPcDisconnected() → restartAutoSearchWindow()`),
 否则「连上过又掉线」会沿用旧的时间窗直接放弃搜索。
 
-**这张窗口同样约束 SSE 自动重连**(`SseClient.shouldAutoRetry` 门控, §7 #25):
-搜索窗口关闭且未连接时, SSE 重连循环必须退出 —— 否则会出现「扫描已按设计停止、
-SSE 却整夜每 2 秒对关机的电脑空转重连, 早上电脑一开机就秒连」的行为,
-既违背省电承诺, 秒连还会绕过握手直接制造状态分裂(§3.16)。
+**这张窗口同样约束 SSE 自动重连**(`SseClient.nextRetryDelayMs` 调度, §7 #25/#26):
+重连间隔与扫描共用同一张时间表(`LanDiscovery.currentAutoRetryIntervalMs()`:
+0–5 分钟 2 s / 5–9 分钟 60 s / 9–15 分钟 120 s), 搜索窗口关闭且未连接时返回 null,
+SSE 重连循环退出 —— 否则会出现「扫描已按设计降频/停止、SSE 却仍每 2 秒对关机的
+电脑空转重连, 早上电脑一开机就秒连」的行为, 既违背省电承诺,
+秒连还会绕过握手直接制造状态分裂(§3.16)。
 
-**推论**: 新增后台轮询任务时, 请照这个模式设计「能停、能降频」, 不要写死循环。
+**窗口关闭后 mDNS 发现也不得自动连接**(§7 #26): NsdHelper 的 mDNS 监听是常驻的,
+不随 15 分钟窗口关闭。`onDeviceDiscovered` 在未连接且 `isSearching == false` 时
+只记录设备、不发起自动握手 —— 否则电脑一开机就会被 mDNS 发现 → 自动握手 → 自动连接,
+「停止后等待手动触发」形同虚设(2026-09-20 日志实证: 10:20 搜索停止,
+10:27 电脑开机后仍被 mDNS 自动连上)。
+
+**推论**: 新增后台轮询/监听任务时, 请照这个模式设计「能停、能降频」,
+并且**所有会导致自动连接的入口**(扫描、SSE 重连、mDNS 回调)都要过同一张窗口闸门。
 
 ### 3.9 为什么文件要落盘到 SAF 目录 / 为什么临时文件在 cacheDir
 
@@ -505,7 +516,7 @@ val NOTIFICATION_SMALL_ICON = R.drawable.ic_notification_foreground
 | `network/FileUploader.kt` | 手机→电脑文件发送(分块+加密+进度), 带 `file_hash`, 电脑端已有该文件时整个跳过上传 | `CHUNK_SIZE`、二进制帧格式 |
 | `network/FileReceiver.kt` | 电脑→手机文件接收(临时文件+校验+落盘), **同名+同大小+同哈希去重** | `SaveDirManager` |
 | `network/HttpUploader.kt` | 剪贴板密文、心跳上报、**主动断开时向电脑端发的 `POST /disconnect` 告别请求** | 协议字段; 该请求是「尽力而为」, 失败静默, 由 §3.13 的两条兜底路径接管 |
-| `network/SseClient.kt` | 出站长连接客户端, `activeUrl` 暴露实际连上的地址(供补握手反解) | 重连策略受 `shouldAutoRetry` 门控(§3.8/§3.16) |
+| `network/SseClient.kt` | 出站长连接客户端, `activeUrl` 暴露实际连上的地址(供补握手反解) | 重连策略受 `nextRetryDelayMs` 调度(§3.8/§3.16) |
 | `network/LanDiscovery.kt` | UDP 广播、子网并发探测、**自动搜索降频状态机** | 耗电表现 |
 | `network/NsdHelper.kt` | mDNS 发现 + HTTP 探活过滤幽灵缓存 | 发现成功率 |
 | `crypto/CryptoUtil.kt` | 与 Rust `crypto.rs` **逐字节对称** | 改一端必须改另一端 |
@@ -656,7 +667,8 @@ lamport_clock = hub 分配的单调时钟                              # 仅剪�
 | 22 | #21 对齐后选择列表仍比 LocalSend 的少得多: LocalSend 的「打开方式」横跨十几页(MT 全家桶、微信、网盘), 我们只匹配到少数注册目录 MIME 的应用 | 扒 LocalSend 完整源码发现「打开目录」走的根本不是原生 `FileOpener.openUri`, 而是 `open_folder.dart` → `open_file` 插件(`open_file_android-1.1.0`, OpenFilePlugin.startActivity + FileUtil): ① 用**自己的 FileProvider** 把目录真实路径转成 content URI(`<authority>/external-path/storage/emulated/0/Download`, path 内嵌绝对路径, MT「定位所在位置」正是靠还原它定位的); ② 目录无扩展名, 插件扩展名表兜底为 **`*/*`** —— resolver 因此列出所有「能看任意内容」的应用; ③ `grantUriPermission` 对全部 resolver **逐个预授权**(读写), intent 上再加 grant flag; ④ 隐式调起。我们此前发的是 `vnd.android.document/directory` 窄口径 + 无授权的合成 document URI, 三样全不沾 | 完整照抄: `resolveOpenableDirPath`(默认目录路径 / `primary:xxx` tree ID 还原绝对路径) → FileProvider(file_paths 补 `<external-path path="."/>`, name 也用 `external-path` 保证管理器路径还原兼容) → `ACTION_VIEW + CATEGORY_DEFAULT + *//* + GRANT_READ\|WRITE` → `grantToResolvers` 逐应用预授权 → 隐式调起。二级存储(SDCard)自定义目录还原不了路径时退回 SAF document URI 通道。教训: **「照抄」要抄到源码层 —— 只从界面行为倒推的实现(#21)会漏掉 FileProvider/`*/*`/预授权三个关键细节** |
 | 23 | 手机改用 SAF 自定义保存目录后, 电脑端重发同一文件不再跳过(默认目录下会跳过), 手机侧重复落盘为 `a (2).apk` 等副本 | `FileReceiver.findExistingDuplicate` 以「SAF 列举子项并逐个读取代价高、收益不成正比」为由对自定义目录直接 `return null` 放弃去重; 但该理由把去重误判为「全目录遍历逐个哈希」—— 真实成本模型只是「按精确同名定位**单个**候选 + 同大小才流式算一次哈希」, 与落盘时 `queryChildNames` 重名规避同量级 | 自定义目录改走 `SaveDirManager.findCustomDirChild`(一次 children 查询取回 名称/大小/文档ID) 定位候选, `CryptoUtil.computeHashStream`(从 `computeHashFile` 抽出的流式核心) 对 `openInputStream` 算哈希, 两种目录模式判定语义(同名+同大小+同哈希)完全一致; SAF 查询/授权异常一律按未命中处理, 最坏只是多传一次。教训: **否决方案前先把成本模型算准 —— 「遍历目录」和「按名定位单个候选」差着量级; SAF 的等价物往往与 File API 同构** |
 | 24 | 电脑夜间关机、早上开机后: 手机页面同时显示「已连接」和「未连接设备」, 电脑→手机单通、手机→电脑全灭, 托盘显示「安卓手机」而非真实品牌 | 连接状态由 `connectionState`(SSE 存活)与 `currentPcIp`(握手赋值)两份变量表达, **SSE 自动重连线程复活长连接时跳过了握手**: 夜间看门狗周期性 `loadPreferences` 清空 `currentPcIp`(断开态允许) + 扫描 15 分钟超时停止(没有发现路径再触发握手), 早上 SSE 秒连只剩半套状态。2.5.0 首修只治了「loadPreferences 不在连接中清空」这一半, 没堵住重连旁路 | `onConnectionChanged(true)` 发现握手状态缺失(currentPcIp 为空或与 SSE 实际地址不符)时, 从 `SseClient.activeUrl` 反解地址补一次 `/auth` 握手, 成功才按自动握手路径同一套赋值原子转正(§3.16); 403 则断开回到搜索态。教训: **自动重连复活的不只是传输通道, 还有连接的语义状态; 重连路径与首次连接路径必须收敛到同一套状态赋值, 「已连接」判定必须同时校验握手派生状态** |
-| 25 | 自动搜索按设计 15 分钟超时停止了, 手机却整夜每 8 秒对关机的电脑发起 SSE 重连, 早上电脑一开机就被秒连(绕过握手, 直接撞进 #24 的状态分裂) | `SseClient` 的重连循环是独立的 `while` 死循环, 不知道 LanDiscovery 的「5 分钟降频 / 15 分钟停止」省电窗口; 扫描停了它还在转, 既违背「停止后等待手动触发」的设计承诺, 又整夜空转耗电, 还让秒连绕过握手成为状态分裂的入口 | `SseClient` 增加 `shouldAutoRetry` 门控, 服务端传「已连接 或 搜索进行中」; 搜索窗口关闭且未连接时重连循环退出, 恢复靠用户「重新扫描」→ 重新握手 → `connect()`(§3.8/§3.16)。教训: **同类「重试/保活」后台任务必须与对应的主任务共享同一张省电闸门, 各写各的死循环就是在拆省电策略的台** |
+| 25 | 自动搜索按设计 15 分钟超时停止了, 手机却整夜每 8 秒对关机的电脑发起 SSE 重连, 早上电脑一开机就被秒连(绕过握手, 直接撞进 #24 的状态分裂) | `SseClient` 的重连循环是独立的 `while` 死循环, 不知道 LanDiscovery 的省电窗口; 扫描停了它还在转, 既违背「停止后等待手动触发」的设计承诺, 又整夜空转耗电, 还让秒连绕过握手成为状态分裂的入口 | `SseClient` 增加重连门控; 2.5.2 进一步升级为 `nextRetryDelayMs` 调度 —— 重连间隔与扫描共用同一张时间表(`LanDiscovery.currentAutoRetryIntervalMs()`: 0–5 分钟 2 s / 5–9 分钟 60 s / 9–15 分钟 120 s), 窗口关闭返回 null 退出循环, 恢复靠用户「重新扫描」→ 重新握手 → `connect()`(§3.8/§3.16)。教训: **同类「重试/保活」后台任务必须与对应的主任务共享同一张省电时间表 —— 只共享「停」不共享「降频」, 降频期照样空转 10 分钟(2.5.1 实测)** |
+| 26 | 2.5.1 修复 #25 后, 15 分钟搜索停止生效了(10:20 停止), 但电脑 10:27 一开机手机仍自动连接 —— 「停止后等待手动触发」再次被绕过 | mDNS 监听(`NsdHelper`)是**常驻**的, 只在 `triggerRescan`/`onDestroy` 时停止, 不随 15 分钟窗口关闭; 电脑开机发布 mDNS 服务 → `onDeviceDiscovered` → 自动握手 → 自动连接。#25 只闸住了「主动找」(UDP/子网扫描 + SSE 重连), 漏了「被动听」(mDNS 回调)这条自动连接入口 | `onDeviceDiscovered` 增加窗口闸门: 未连接且 `lanDiscovery.isSearching == false` 时只把设备记入列表供页面展示, 不发起自动握手, 连接必须等用户点「重新扫描」。教训: **省电窗口要闸的是「自动连接」这个行为本身, 而不是某一条发现通道 —— 每新增一条发现/监听通道, 都要过同一张闸门** |
 
 ---
 
@@ -728,7 +740,7 @@ cd android && ./gradlew assembleRelease
 | **防回环** | 通过内容哈希拦截自己写入引发的反射同步 |
 | **降级链** | Shizuku → 普通写入 → 透明 Activity 的三层剪贴板写入策略 |
 | **唤醒脉冲** | UID 2000 Shell 进程每 10 秒发的广播, 用于解冻被 ROM 冷冻的应用进程 |
-| **时间窗** | 自动搜索的分阶段降频计时(0–5 / 5–15 / >15 分钟) |
+| **时间窗** | 自动搜索的分阶段降频计时(0–5 / 5–9 / 9–15 / >15 分钟) |
 | **手动断开抑制** | `manualDisconnected` 标志: 用户点过断开后, 扫描结果不再触发自动重连, 直到用户主动发起连接(§3.12) |
 | **Peer 摘除** | `Broadcaster::unregister_peer()`: 连接结束时把该 IP 从 Peer 表移除, 让托盘状态与真实连接同步(§3.13) |
 | **通知小图标** | 通知栏左侧的图标, 被系统按 alpha 蒙版渲染, 因此必须用图案层而非完整图标(§3.14) |

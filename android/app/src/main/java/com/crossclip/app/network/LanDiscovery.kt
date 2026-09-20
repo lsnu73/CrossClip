@@ -122,7 +122,7 @@ class LanDiscovery(
     val autoSearchEnabled: Boolean
         get() = autoSearchEnabledState
 
-    /** 本轮自动搜索的时间窗起点，用于 0-5 / 5-15 / >15 分钟的分级降频 */
+    /** 本轮自动搜索的时间窗起点，用于 0-5 / 5-9 / 9-15 / >15 分钟的分级降频 */
     @Volatile
     private var searchWindowStartMs: Long = 0L
 
@@ -134,17 +134,26 @@ class LanDiscovery(
         /** 0-5 分钟：正常扫描间隔 */
         private const val SCAN_INTERVAL_FAST_MS = 2500L
 
-        /** 5-15 分钟：降频后的扫描间隔（每分钟一次） */
+        /** 5-9 分钟：第一档降频后的扫描间隔（每分钟一次） */
         private const val SCAN_INTERVAL_SLOW_MS = 60_000L
+
+        /** 9-15 分钟：第二档降频后的扫描间隔（每 2 分钟一次） */
+        private const val SCAN_INTERVAL_SLOWER_MS = 120_000L
 
         /** 超过该时长仍未发现电脑就停止自动搜索，等待用户手动触发 */
         private const val AUTO_SEARCH_STOP_MS = 15 * 60 * 1000L
 
-        /** 超过该时长开始降频 */
+        /** 超过该时长进入第一档降频（每分钟一次） */
         private const val AUTO_SEARCH_SLOWDOWN_MS = 5 * 60 * 1000L
+
+        /** 超过该时长进入第二档降频（每 2 分钟一次） */
+        private const val AUTO_SEARCH_SLOWDOWN2_MS = 9 * 60 * 1000L
 
         /** 手动扫描模式下实际执行的扫描轮数 */
         private const val MANUAL_SCAN_ROUNDS = 3
+
+        /** 自动重连在快档阶段（0-5 分钟）的间隔：面向 SSE 重连等轻量 TCP 重试 */
+        private const val RETRY_INTERVAL_FAST_MS = 2000L
     }
 
     /**
@@ -168,15 +177,33 @@ class LanDiscovery(
     }
 
     /**
-     * 重置「5 分钟降频 / 15 分钟停止」的自动搜索时间窗。
+     * 重置「5/9 分钟降频、15 分钟停止」的自动搜索时间窗。
      *
      * 电脑端掉线时由服务调用。若不重置，连接期间流逝的时间会让断线瞬间就被判定为
      * 「已超时」，扫描线程立刻停止（页面显示「搜索已暂停」），与设计意图
-     * ——断线后继续高频搜 5 分钟、再低频搜 10 分钟才停——不符。
+     * ——断线后先高频搜 5 分钟、再每分钟一次搜到 9 分钟、再每 2 分钟一次搜到 15 分钟才停——不符。
      */
     fun restartAutoSearchWindow() {
         searchWindowStartMs = System.currentTimeMillis()
-        DebugLogger.log(TAG, "已重置自动搜索时间窗（断线后重新计时：5 分钟降频 / 15 分钟停止）")
+        DebugLogger.log(TAG, "已重置自动搜索时间窗（断线后重新计时：0-5 分钟高频 / 5-9 分钟每分钟 / 9-15 分钟每 2 分钟 / 15 分钟停止）")
+    }
+
+    /**
+     * 当前时间窗阶段对应的自动重试间隔（毫秒）；搜索窗口已关闭时返回 null。
+     *
+     * 与扫描线程的分级降频共用同一张时间表（0-5 分钟 2 秒 / 5-9 分钟 1 分钟 /
+     * 9-15 分钟 2 分钟 / 15 分钟后停止），供 SSE 自动重连循环对齐——重连与扫描
+     * 必须同频同停，否则扫描已降频而重连仍每 2 秒空转，省电窗口形同虚设。
+     */
+    fun currentAutoRetryIntervalMs(): Long? {
+        if (!autoSearchEnabledState || !isSearching) return null
+        val elapsed = System.currentTimeMillis() - searchWindowStartMs
+        return when {
+            elapsed < AUTO_SEARCH_SLOWDOWN_MS -> RETRY_INTERVAL_FAST_MS
+            elapsed < AUTO_SEARCH_SLOWDOWN2_MS -> SCAN_INTERVAL_SLOW_MS
+            elapsed < AUTO_SEARCH_STOP_MS -> SCAN_INTERVAL_SLOWER_MS
+            else -> null
+        }
     }
 
     fun startDiscovery(
@@ -316,11 +343,12 @@ class LanDiscovery(
                     break
                 }
 
-                // 5. 分阶段降频：0-5 分钟正常 → 5-15 分钟每分钟一次 → 超过 15 分钟停止
+                // 5. 分阶段降频：0-5 分钟高频 → 5-9 分钟每分钟一次 → 9-15 分钟每 2 分钟一次 → 超过 15 分钟停止
                 val elapsed = System.currentTimeMillis() - searchWindowStartMs
                 val interval = when {
                     elapsed < AUTO_SEARCH_SLOWDOWN_MS -> SCAN_INTERVAL_FAST_MS
-                    elapsed < AUTO_SEARCH_STOP_MS -> SCAN_INTERVAL_SLOW_MS
+                    elapsed < AUTO_SEARCH_SLOWDOWN2_MS -> SCAN_INTERVAL_SLOW_MS
+                    elapsed < AUTO_SEARCH_STOP_MS -> SCAN_INTERVAL_SLOWER_MS
                     else -> {
                         DebugLogger.log(
                             TAG,

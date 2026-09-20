@@ -16,14 +16,15 @@ class SseClient(
     private val onConnectionChanged: (Boolean) -> Unit,
     private val onFileEvent: ((eventType: String, data: JSONObject) -> Unit)? = null,
     /**
-     * 自动重连门控：返回 false 时重连循环立即退出（而不是继续每 2 秒空转）。
+     * 自动重连调度：返回下一次重试前应等待的毫秒数；返回 null 表示重连循环立即退出。
      *
-     * 服务端传「已连接 或 局域网搜索仍在进行」——与 LanDiscovery 的
-     * 「5 分钟降频 / 15 分钟停止」省电策略同一张闸门。搜索窗口已关闭时，
-     * 对着关机的电脑每 2 秒发起一次 TCP 连接纯属白白唤醒射频芯片，
-     * 也正是「夜间已停止扫描、早上电脑一开机却秒连」这种违背省电设计的行为来源。
+     * 服务端传入与 LanDiscovery 省电窗口同一张时间表：已连接时 2 秒快速重连；
+     * 未连接时跟随搜索窗口分级降频（0-5 分钟 2 秒 / 5-9 分钟 1 分钟 /
+     * 9-15 分钟 2 分钟），15 分钟窗口关闭后返回 null。搜索已降频而重连仍每 2 秒
+     * 对着关机的电脑发起 TCP 连接，纯属白白唤醒射频芯片——「夜间已停止扫描、
+     * 早上电脑一开机却秒连」这种违背省电设计的行为正来源于此。
      */
-    private val shouldAutoRetry: (() -> Boolean)? = null
+    private val nextRetryDelayMs: (() -> Long?)? = null
 ) {
     private val TAG = "CrossClipSSE"
     @Volatile
@@ -71,10 +72,12 @@ class SseClient(
                 .build()
 
             while (isActive(myGen)) {
-                // 重连门控：搜索窗口已关闭（15 分钟超时 / 自动搜索关停）且当前未连接时，
-                // 停止重连循环。恢复路径由上层负责——用户「重新扫描」或重新握手成功后
-                // 会再次调用 connect() 拉起新一代连接线程。
-                if (shouldAutoRetry?.invoke() == false) {
+                // 重连调度：每一轮开头取一次当前窗口阶段对应的间隔。搜索窗口已关闭
+                // （15 分钟超时 / 自动搜索关停）且未连接时返回 null，退出重连循环。
+                // 恢复路径由上层负责——用户「重新扫描」或重新握手成功后会再次调用
+                // connect() 拉起新一代连接线程。
+                val retryDelayMs = nextRetryDelayMs?.invoke()
+                if (nextRetryDelayMs != null && retryDelayMs == null) {
                     DebugLogger.log("SSE", "搜索窗口已关闭且未连接，停止 SSE 自动重连（等待用户手动触发）")
                     break
                 }
@@ -154,11 +157,12 @@ class SseClient(
                         currentCall = null
                     }
                     if (isActive(myGen)) {
-                        Log.w(TAG, "SSE 连接异常断开: ${e.message}，将在 2 秒后自动重连...")
-                        DebugLogger.log("SSE", "SSE 异常断开: ${e.javaClass.simpleName}: ${e.message}，2 秒后重试", e)
+                        val delayMs = retryDelayMs ?: 2000L
+                        Log.w(TAG, "SSE 连接异常断开: ${e.message}，将在 ${delayMs / 1000} 秒后自动重连...")
+                        DebugLogger.log("SSE", "SSE 异常断开: ${e.javaClass.simpleName}: ${e.message}，${delayMs / 1000} 秒后重试", e)
                         onConnectionChanged(false)
                         try {
-                            Thread.sleep(2000)
+                            Thread.sleep(delayMs)
                         } catch (_: InterruptedException) {
                             break
                         }

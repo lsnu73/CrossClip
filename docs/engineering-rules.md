@@ -17,7 +17,8 @@
 - 心跳上报统一走 `SyncForegroundService.sendHeartbeatThrottled()`:定时心跳线程(30s)、Shell(UID 2000) 唤醒脉冲、亮屏事件共用这一个入口,靠 `HEARTBEAT_MIN_GAP_MS`(25s) 去重,避免同一时刻多路重复发 HTTP;进程被 ROM 冻结时定时线程停摆,脉冲解冻后会立即补发一次(此时距上次上报已超过节流窗口);
 - 电脑端在线判定余量:`rust_desktop/src/server.rs` 中 peers 超时为 600s,心跳周期 ≤30s 即有余量;手机端感知电脑掉线靠 SSE 断开(秒级)与局域网探测,**不要**用提高心跳频率来解决;
 - Shell 唤醒脉冲周期 `ShizukuPrivilegeHelper.PULSE_INTERVAL_SEC`(当前 10s) 只决定「进程被冷冻时的最坏同步延迟」,进程活跃时同步由原生/Shizuku 监听实时触发,调整该值需同步评估待机功耗;
-- Shizuku 剪贴板轮询仅在底层 Binder 监听注册失败时启用(息屏自动暂停),监听就绪时不得再叠加高频轮询。
+- Shizuku 剪贴板轮询仅在底层 Binder 监听注册失败时启用(息屏自动暂停),监听就绪时不得再叠加高频轮询;
+- 自动搜索、SSE 自动重连、mDNS 发现后的自动握手共用**同一张省电时间表**(0–5 分钟高频、5–9 分钟每 60s、9–15 分钟每 120s、>15 分钟停止等待手动触发,由 `LanDiscovery` 时间窗统一驱动);任何新增的「会导致自动连接」的发现/监听入口都必须过这张闸门(`isSearching` / `currentAutoRetryIntervalMs()`),只闸「主动找」不闸「被动听」等于没闸(§7 #25/#26)。
 
 ## Windows 托盘程序生命周期
 

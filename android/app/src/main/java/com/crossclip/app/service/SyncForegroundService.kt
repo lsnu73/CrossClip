@@ -465,7 +465,7 @@ class SyncForegroundService : Service() {
                     discoveredDevices[devId] = DiscoveredDevice(devId, currentPcName, currentPcIp, currentHttpPort, ts)
                 }
             } else if (!ok && connectionState == 1) {
-                DebugLogger.warn("HEARTBEAT", "心跳上报失败，电脑端已离线，重启 5/15 分钟搜索计时")
+                DebugLogger.warn("HEARTBEAT", "心跳上报失败，电脑端已离线，重启 5/9/15 分钟搜索计时")
                 connectionState = 0
                 lanDiscovery.isConnected = false
                 currentPcIp = ""
@@ -661,7 +661,7 @@ class SyncForegroundService : Service() {
                     }
                     lanDiscovery.isConnected = false
                     if (wasConnected) {
-                        // 掉线统一处理：重新计时 5/15 分钟并（必要时）重启扫描
+                        // 掉线统一处理：重新计时 5/9/15 分钟并（必要时）重启扫描
                         onPcDisconnected()
                     } else {
                         mainHandler.post { updateNotification(statusTextForNotification()) }
@@ -693,11 +693,16 @@ class SyncForegroundService : Service() {
                     }
                 }
             },
-            // 自动重连门控与 LanDiscovery 的省电窗口同开同关：
-            // 已连接时始终允许重连（秒级恢复抖动）；未连接时只跟着搜索窗口走，
-            // 搜索停止（15 分钟超时 / 手动关停）后不再对关机的电脑空转重连、耗电
-            shouldAutoRetry = {
-                connectionState == 1 || (this::lanDiscovery.isInitialized && lanDiscovery.isSearching)
+            // 自动重连调度与 LanDiscovery 的省电窗口同一张时间表：
+            // 已连接时 2 秒快速重连（秒级恢复抖动）；未连接时跟随搜索窗口分级降频
+            // （0-5 分钟 2 秒 / 5-9 分钟 1 分钟 / 9-15 分钟 2 分钟），
+            // 窗口停止后返回 null，重连循环退出，不再对关机的电脑空转耗电
+            nextRetryDelayMs = {
+                when {
+                    connectionState == 1 -> 2000L
+                    this::lanDiscovery.isInitialized -> lanDiscovery.currentAutoRetryIntervalMs()
+                    else -> 2000L
+                }
             }
         )
 
@@ -713,7 +718,7 @@ class SyncForegroundService : Service() {
                 if (currentPcName == name && connectionState == 1) {
                     connectionState = 0
                     lanDiscovery.isConnected = false
-                    // 与 SSE / 心跳掉线保持一致：重置 5/15 分钟搜索时间窗并刷新通知栏文案
+                    // 与 SSE / 心跳掉线保持一致：重置 5/9/15 分钟搜索时间窗并刷新通知栏文案
                     onPcDisconnected()
                 }
             }
@@ -858,8 +863,8 @@ class SyncForegroundService : Service() {
         return when {
             connectionState == 1 -> "✅ 已连接电脑 ($currentPcName)"
             connectionState == -1 -> "⏳ 正在配对连接电脑..."
-            !autoSearchEnabled -> "⏸ 自动搜索已关闭，点开应用「重新扫描」手动查找"
-            !searching -> "⏸ 搜索已暂停，点开应用「重新扫描」继续查找"
+            !autoSearchEnabled -> "⏸ 自动搜索已关闭，进入「电脑配对」点「重新扫描」手动查找"
+            !searching -> "⏸ 搜索已暂停，进入「电脑配对」点「重新扫描」继续查找"
             else -> "🔍 搜索电脑中..."
         }
     }
@@ -867,7 +872,7 @@ class SyncForegroundService : Service() {
     /**
      * 电脑端掉线后的统一处理。
      *
-     * 1. 自动搜索开启时，重置「5 分钟降频 / 15 分钟停止」时间窗，让省电策略从**掉线时刻**
+     * 1. 自动搜索开启时，重置「5/9 分钟降频、15 分钟停止」时间窗，让省电策略从**掉线时刻**
      *    重新计时（否则连接期间流逝的时间会让断线瞬间就被判定超时、扫描线程立即停止）；
      * 2. 若扫描线程已停止（例如上一轮已超时退出），重新拉起局域网自动搜索；
      * 3. 刷新通知栏文案，使其与自动搜索开关状态、页面文案保持一致。
@@ -1049,6 +1054,16 @@ class SyncForegroundService : Service() {
         }
 
         // 2. 若未连接，检查是否为记忆中的目标电脑，若是则自动触发后台静默握手
+        //    前提：搜索窗口仍开着。mDNS 监听（NsdHelper）是常驻的，不随
+        //    「15 分钟停止」关闭——若不拦住，电脑一开机就会被 mDNS 发现 → 自动握手
+        //    → 自动连接，「停止搜索等待手动触发」的省电设计形同虚设
+        //    （2026-09-20 日志实证：10:20 搜索停止，10:27 mDNS 发现后仍自动连上）。
+        //    窗口关闭时只把设备记入列表供页面展示，连接必须等用户点「重新扫描」。
+        val searchWindowOpen = this::lanDiscovery.isInitialized && lanDiscovery.isSearching
+        if (!searchWindowOpen) {
+            DebugLogger.log("DISCOVERY", "搜索窗口已关闭，发现设备但不自动连接（等待手动「重新扫描」）: $name ($ip)")
+            return
+        }
         var shouldTriggerConnect = false
         val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         val devPin = sp.getString("pin_code_$finalDevId", "") ?: ""
