@@ -17,23 +17,23 @@
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased;
   min-height:100vh;padding:48px 28px 72px;display:flex;justify-content:center}
-。wrap{display:flex;gap:48px;align-items:flex-start;flex-wrap:wrap;justify-content:center}
+.wrap{display:flex;gap:48px;align-items:flex-start;flex-wrap:wrap;justify-content:center}
 
 /* ---------- 手机外壳 ---------- */
-。phone{width:390px;height:812px;background:var(--surface);border-radius:46px;border:1px solid #DADADD;
+.phone{width:390px;height:812px;background:var(--surface);border-radius:46px;border:1px solid #DADADD;
   box-shadow:0 1px 2px rgba(0,0,0,.04),0 26px 52px -26px rgba(20,22,28,.32);
   overflow:hidden;position:relative;display:flex;flex-direction:column;flex:0 0 auto}
-。viewport{flex:1;position:relative;overflow:hidden;background:var(--surface)}
-。screen{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--surface);
+.viewport{flex:1;position:relative;overflow:hidden;background:var(--surface)}
+.screen{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--surface);
   opacity:0;visibility:hidden;transform:translateX(28px);pointer-events:none}
-。screen.active{opacity:1;visibility:visible;transform:none;pointer-events:auto}
-。screen.anim{transition:opacity .26s cubic-bezier(.22,.61,.36,1),transform .26s cubic-bezier(.22,.61,.36,1)}
-。screen.behind{opacity:0;visibility:hidden;transform:translateX(-14px)}
+.screen.active{opacity:1;visibility:visible;transform:none;pointer-events:auto}
+.screen.anim{transition:opacity .26s cubic-bezier(.22,.61,.36,1),transform .26s cubic-bezier(.22,.61,.36,1)}
+.screen.behind{opacity:0;visibility:hidden;transform:translateX(-14px)}
 
 /* ---------- 状态栏 ---------- */
-。status{height:48px;flex:0 0 48px;display:flex;align-items:flex-end;justify-content:space-between;
+.status{height:48px;flex:0 0 48px;display:flex;align-items:flex-end;justify-content:space-between;
   padding:0 26px 8px;font-size:13px;font-weight:600;background:var(--surface);z-index:2}
-。rt{display:flex;align-items:center;gap:6px}
+.rt{display:flex;align-items:center;gap:6px}
 .bars{display:flex;align-items:flex-end;gap:2px;height:11px}
 .bars i{width:3px;background:var(--text);border-radius:1px;display:block}
 .bars i:nth-child(1){height:4px}.bars i:nth-child(2){height:6.5px}
