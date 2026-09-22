@@ -10,7 +10,7 @@
 CrossClip 是一套**纯局域网、点对点**的剪贴板双向同步 & 文件互传工具：Windows 电脑与 Android 手机连接同一 Wi-Fi/局域网后，文本、代码、链接可在两端**秒级无感互传**，还支持**双向文件传输**。全程无需公网服务器，数据不出局域网。
 
 正式安装包可从 [Releases](https://github.com/zxzc114514/CrossClip/releases) 下载，也可按下方说明自行构建。
-
+安卓页面可以从 https://lsnu73.github.io/CrossClip/ 预览，或者下载根目录中的 `index.html`预览
 ## 功能特性
 
 - **去中心化点对点**：无云服务器中转，传输只发生在局域网内部；
