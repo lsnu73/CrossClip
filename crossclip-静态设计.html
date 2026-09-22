@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CrossClip 设置页 · 重设计提案 v2</title>
+<style>
+:root{
+  --bg:#F2F2F4;
+  --surface:#FFFFFF;
+  --text:#16181D;
+  --text-2:#6E7480;
+  --text-3:#A0A6B0;
+  --line:rgba(16,18,22,.07);
+  --line-strong:rgba(16,18,22,.12);
+  --accent:#0E7C66;
+  --danger:#C2453A;
+  --link:#1668CE;
+  --r-card:14px;
+  --r-ctl:10px;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-smoothing:antialiased;padding:56px 32px 80px}
+
+.doc{max-width:1320px;margin:0 auto}
+.doc-head{border-bottom:1px solid var(--line-strong);padding-bottom:22px;margin-bottom:38px}
+.doc-head h1{font-size:22px;font-weight:600;letter-spacing:-.01em}
+.doc-head p{font-size:13.5px;color:var(--text-2);margin-top:8px;line-height:1.7;max-width:800px}
+.doc-head .meta{margin-top:14px;font-family:var(--mono);font-size:11.5px;color:var(--text-3);letter-spacing:.04em}
+
+.stage{display:flex;flex-wrap:wrap;gap:44px 40px;justify-content:flex-start}
+.shot{width:390px}
+.phone{width:390px;height:812px;background:var(--surface);border-radius:46px;border:1px solid #DADADD;
+  box-shadow:0 1px 2px rgba(0,0,0,.04),0 24px 48px -24px rgba(20,22,28,.28);
+  overflow:hidden;position:relative;display:flex;flex-direction:column}
+.caption{margin-top:16px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.caption b{font-size:13.5px;font-weight:600}
+.caption span{font-size:12px;color:var(--text-3);font-family:var(--mono)}
+.caption i{display:block;font-style:normal;font-size:12px;color:var(--text-2);margin-top:6px;line-height:1.6;width:100%}
+
+.status{height:48px;flex:0 0 48px;display:flex;align-items:flex-end;justify-content:space-between;
+  padding:0 26px 8px;font-size:13px;font-weight:600}
+.rt{display:flex;align-items:center;gap:6px}
+.bars{display:flex;align-items:flex-end;gap:2px;height:11px}
+.bars i{width:3px;background:var(--text);border-radius:1px;display:block}
+.bars i:nth-child(1){height:4px}.bars i:nth-child(2){height:6.5px}
+.bars i:nth-child(3){height:9px}.bars i:nth-child(4){height:11px}
+.batt{width:24px;height:12px;border:1.2px solid rgba(22,24,29,.4);border-radius:3.5px;position:relative;padding:1.5px}
+.batt::after{content:"";position:absolute;right:-3.5px;top:3.5px;width:2px;height:5px;background:rgba(22,24,29,.4);border-radius:0 2px 2px 0}
+.batt i{display:block;height:100%;width:72%;background:var(--text);border-radius:1.5px}
+
+.bar{height:46px;flex:0 0 46px;display:flex;align-items:center;padding:0 20px;border-bottom:1px solid var(--line);position:relative}
+.bar .back{display:flex;align-items:center;gap:2px;color:var(--text);font-size:15px}
+.bar h2{position:absolute;left:0;right:0;text-align:center;font-size:16.5px;font-weight:600;pointer-events:none}
+.bar .act{position:absolute;right:20px;font-size:14px;color:var(--text-2)}
+
+.scroll{flex:1;overflow:hidden;background:var(--surface)}
+.pad{padding-bottom:24px}
+
+.hero{padding:20px 20px 18px}
+.tag{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;letter-spacing:.04em;
+  color:var(--accent);background:rgba(14,124,102,.08);padding:4px 9px;border-radius:6px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.hero h3{font-size:25px;font-weight:650;letter-spacing:-.02em;margin-top:12px}
+.hero .ip{font-family:var(--mono);font-size:12.5px;color:var(--text-2);margin-top:6px}
+.hero .ip em{font-style:normal;color:var(--text-3)}
+.code-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;
+  background:#F7F7F8;border:1px solid var(--line);border-radius:var(--r-ctl);padding:10px 12px}
+.code-row .lb{font-size:11px;color:var(--text-3);letter-spacing:.06em;margin-bottom:3px}
+.code-row .code{font-family:var(--mono);font-size:20px;font-weight:600;letter-spacing:.14em}
+.link-btn{font-size:13px;color:var(--text-2);border-bottom:1px solid var(--line-strong);padding-bottom:1px;white-space:nowrap}
+.hero-meta{display:flex;gap:16px;margin-top:14px;font-size:12px;color:var(--text-3)}
+.hero-meta b{font-weight:600;color:var(--text-2);font-family:var(--mono)}
+
+.sec-h{padding:26px 20px 8px;font-size:11.5px;font-weight:600;letter-spacing:.1em;color:var(--text-3)}
+.row{display:flex;align-items:center;gap:14px;padding:12px 20px;min-height:54px}
+.row .t{flex:1;min-width:0}
+.row .t b{display:block;font-size:15px;font-weight:500}
+.row .t s{display:block;text-decoration:none;font-size:12.5px;color:var(--text-3);margin-top:3px;line-height:1.45}
+.row .v{font-size:13.5px;color:var(--text-3);font-family:var(--mono);text-align:right;max-width:150px}
+.row .v.path{font-size:11.5px;line-height:1.4;color:var(--link)}
+.div{height:1px;background:var(--line);margin-left:20px}
+.chev{width:7px;height:7px;border-top:1.5px solid #C6CBD3;border-right:1.5px solid #C6CBD3;transform:rotate(45deg);flex:0 0 auto;margin-left:-6px}
+.go{font-size:13px;color:var(--text-2);flex:0 0 auto;white-space:nowrap}
+
+.why{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border-radius:50%;
+  border:1px solid #C6CBD3;color:#A0A6B0;font-size:9px;font-style:normal;font-weight:600;font-family:var(--mono);
+  margin-left:6px;vertical-align:1px;line-height:1}
+.why::after{content:"i"}
+.why.on{background:#16181D;border-color:#16181D;color:#fff}
+.explain{margin:2px 20px 12px;padding:10px 12px;background:#F7F7F8;border:1px solid var(--line);
+  border-radius:var(--r-ctl);font-size:12.5px;line-height:1.7;color:var(--text-2)}
+.explain u{text-decoration:none;color:var(--text);font-weight:600}
+
+.sw{width:44px;height:26px;border-radius:13px;background:#E3E4E8;position:relative;flex:0 0 auto}
+.sw.on{background:var(--accent)}
+.sw i{position:absolute;top:2px;left:2px;width:22px;height:22px;border-radius:50%;background:#fff;
+  box-shadow:0 1px 2px rgba(0,0,0,.18)}
+.sw.on i{transform:translateX(18px)}
+
+.btn-primary{background:#16181D;color:#fff;border:0;border-radius:var(--r-ctl);height:38px;padding:0 18px;
+  font-size:14px;font-weight:500;font-family:var(--sans)}
+.btn-ghost{background:#fff;color:var(--text);border:1px solid var(--line-strong);border-radius:var(--r-ctl);
+  height:34px;padding:0 14px;font-size:13px;font-family:var(--sans)}
+.btn-row{display:flex;gap:10px;padding:6px 20px 14px}
+.btn-row .btn-ghost{flex:1;height:36px}
+.danger-row{display:flex;align-items:center;justify-content:space-between;padding:8px 20px 4px}
+.danger-row span{font-size:14px;color:var(--danger)}
+.danger-row em{font-style:normal;font-size:12px;color:var(--text-3)}
+
+.diag-entry{text-align:center;padding:30px 20px 4px}
+.diag-link{font-size:13.5px;color:var(--text-2);background:none;border:0;font-family:var(--sans);
+  text-decoration:underline;text-decoration-color:rgba(110,116,128,.45);text-underline-offset:4px;padding:6px}
+.foot{text-align:center;font-family:var(--mono);font-size:11px;color:#B7BCC4;padding:18px 0 8px;letter-spacing:.03em}
+
+.lead{padding:18px 20px 4px;font-size:13.5px;color:var(--text-2);line-height:1.65}
+.dev{display:flex;align-items:center;gap:12px;padding:14px 20px}
+.dev .ic{width:38px;height:38px;border-radius:9px;border:1px solid var(--line-strong);display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+.dev .t{flex:1;min-width:0}
+.dev .t b{display:block;font-size:15px;font-weight:600}
+.dev .t s{display:block;text-decoration:none;font-family:var(--mono);font-size:11.5px;color:var(--text-3);margin-top:4px}
+.dev.off .ic{opacity:.5}
+.dev.off .t b{color:var(--text-2)}
+.badge{font-size:11px;color:var(--text-3);border:1px solid var(--line-strong);border-radius:5px;padding:2px 6px;white-space:nowrap}
+.badge.live{color:var(--accent);border-color:rgba(14,124,102,.28)}
+.field{margin:14px 20px 0;border:1px solid var(--line-strong);border-radius:var(--r-ctl);height:44px;
+  display:flex;align-items:center;padding:0 12px;font-family:var(--mono);font-size:14px;color:var(--text-3)}
+.field b{font-weight:500;color:var(--text)}
+
+.center-hero{padding:30px 24px 0;text-align:center}
+.center-hero h3{font-size:20px;font-weight:600;letter-spacing:-.01em;margin-top:18px}
+.center-hero p{font-size:13.5px;color:var(--text-2);margin-top:8px;line-height:1.6}
+.center-hero p b{color:var(--text);font-weight:600}
+.boxes{display:flex;gap:8px;padding:26px 20px 0;justify-content:center}
+.boxes div{width:48px;height:56px;border:1px solid var(--line-strong);border-radius:var(--r-ctl);
+  display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:22px;font-weight:600;color:var(--text-3)}
+.boxes div.filled{border-color:#16181D;color:var(--text)}
+.boxes div.cursor{border-color:#16181D;box-shadow:0 0 0 2.5px rgba(22,24,29,.08)}
+.caret{width:1.5px;height:24px;background:var(--accent)}
+.hint{text-align:center;font-size:12.5px;color:var(--text-3);margin-top:14px;line-height:1.6}
+.actions{padding:22px 20px 0}
+.actions .btn-primary{width:100%;height:46px;font-size:15px}
+.sub-act{text-align:center;font-size:13px;color:var(--text-2);margin-top:16px}
+.summary{display:flex;margin:16px 20px 0;border:1px solid var(--line);border-radius:var(--r-ctl);overflow:hidden}
+.summary div{flex:1;padding:11px 12px;border-right:1px solid var(--line);text-align:center}
+.summary div:last-child{border-right:0}
+.summary div b{display:block;font-family:var(--mono);font-size:15px;font-weight:600}
+.summary div s{display:block;text-decoration:none;font-size:11px;color:var(--text-3);margin-top:3px}
+
+.chips{display:flex;gap:8px;padding:14px 20px 10px}
+.chip{font-size:12.5px;color:var(--text-2);border:1px solid var(--line-strong);border-radius:999px;padding:5px 12px}
+.chip.on{background:#16181D;color:#fff;border-color:#16181D}
+.chip.err{color:var(--danger);border-color:rgba(194,69,58,.4)}
+.logbox{margin:2px 20px 0;background:#14161A;border-radius:12px;padding:13px 12px;height:330px;overflow:hidden;
+  font-family:var(--mono);font-size:11px;line-height:1.9;color:#C7CBD3}
+.logbox .ts{color:#6B7280}
+.logbox .info{color:#8A93A0}
+.logbox .ok{color:#4EA88A}
+.logbox .warn{color:#D9A441}
+.logbox .err{color:#E0685C}
+.logbox .dim{color:#5B6270}
+
+.spec{margin-top:76px;border-top:1px solid var(--line-strong);padding-top:34px}
+.spec h4{font-size:15px;font-weight:600;margin-bottom:6px}
+.spec .note{font-size:13px;color:var(--text-2);margin-bottom:26px;line-height:1.7;max-width:860px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:34px}
+.blk h5{font-size:11.5px;font-weight:600;letter-spacing:.1em;color:var(--text-3);margin-bottom:14px}
+.swatches{display:flex;gap:8px}
+.swatches div{flex:1}
+.swatches i{display:block;height:52px;border-radius:8px;border:1px solid rgba(0,0,0,.06)}
+.swatches s{display:block;text-decoration:none;font-family:var(--mono);font-size:10.5px;color:var(--text-2);margin-top:6px;line-height:1.5}
+.type-row{display:flex;align-items:baseline;gap:12px;padding:7px 0;border-bottom:1px solid var(--line)}
+.type-row em{font-style:normal;font-family:var(--mono);font-size:11px;color:var(--text-3);width:78px;flex:0 0 78px}
+.type-row span{font-size:13px;color:var(--text-2)}
+.tok{display:flex;align-items:center;gap:14px;padding:9px 0;border-bottom:1px solid var(--line)}
+.tok em{font-style:normal;font-family:var(--mono);font-size:11px;color:var(--text-3);width:78px;flex:0 0 78px}
+.tok span{font-size:13px;color:var(--text-2)}
+.rbox{border:1px solid var(--line-strong);border-radius:var(--r-card)}
+.rbox.sm{border-radius:var(--r-ctl)}
+.rbox.pill{border-radius:999px}
+.dont{font-size:13px;color:var(--text-2);line-height:1.9}
+.dont b{color:var(--danger);font-weight:500}
+</style>
+</head>
+<body>
+<div class="doc">
+
+  <div class="doc-head">
+    <h1>CrossClip 设置页 · 重设计提案 v2</h1>
+    <p>在 v1 的克制排版基础上完成 11 项评审修订：精简冗余设置、把诊断下沉为二级页、路径改为可点击的蓝色、
+       并为每项设置配一个不占行高的 ⓘ 说明——回答「这个功能到底要不要开」。</p>
+    <div class="meta">390 × 812 · @1x · PingFang SC / SF Pro Text · 3 screens · 2026.09</div>
+  </div>
+
+  <div class="stage">
+
+    <!-- ================= 屏 1：设置 ================= -->
+    <div class="shot">
+      <div class="phone">
+        <div class="status"><span>9:41</span>
+          <div class="rt">
+            <div class="bars"><i></i><i></i><i></i><i></i></div>
+            <svg width="15" height="11" viewBox="0 0 15 11" fill="none"><path d="M1 3.6a9 9 0 0 1 13 0M3.4 6.2a5.4 5.4 0 0 1 8.2 0M6.1 8.7a1.8 1.8 0 0 1 2.8 0" stroke="#16181D" stroke-width="1.3" stroke-linecap="round"/></svg>
+            <div class="batt"><i></i></div>
+          </div>
+        </div>
+        <div class="bar">
+          <div class="back"><svg width="10" height="17" viewBox="0 0 10 17" fill="none"><path d="M8.4 1.2 1.6 8.5l6.8 7.3" stroke="#16181D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h2>设置</h2>
+          <div class="act">关于</div>
+        </div>
+
+        <div class="scroll pad">
+          <div class="hero">
+            <span class="tag"><i class="dot"></i>已连接</span>
+            <h3>WANG</h3>
+            <div class="ip">10.140.146.57 <em>· 局域网</em></div>
+            <div class="code-row">
+              <div>
+                <div class="lb">配对码</div>
+                <div class="code">694 780</div>
+              </div>
+              <span class="link-btn">断开连接</span>
+            </div>
+            <div class="hero-meta">
+              <span>今日已同步 <b>1,284</b> 条</span>
+              <span>上次 <b>12 秒前</b></span>
+            </div>
+          </div>
+
+          <div class="sec-h">同步</div>
+          <div class="row"><div class="t"><b>自动互传模式<i class="why"></i></b><s>剪贴板变更时自动推送到已配对设备</s></div><div class="sw on"><i></i></div></div>
+          <div class="explain">开启后，手机复制的内容会立即出现在电脑上，无需手动发送。<u>日常跨设备办公建议开启</u>；若在意隐私或流量，可关闭后改为手动发送。</div>
+          <div class="div"></div>
+          <div class="row"><div class="t"><b>自动搜索电脑<i class="why"></i></b><s>在局域网内广播发现设备</s></div><div class="sw on"><i></i></div></div>
+
+          <div class="sec-h">隐私与显示</div>
+          <div class="row"><div class="t"><b>最近任务隐藏<i class="why"></i></b><s>防误关：在多任务界面隐藏本应用卡片</s></div><div class="sw on"><i></i></div></div>
+          <div class="div"></div>
+          <div class="row"><div class="t"><b>多任务卡片加锁<i class="why on"></i></b><s>锁定应用卡片，避免被系统回收</s></div><span class="go">去设置</span><i class="chev"></i></div>
+          <div class="explain">把应用卡片锁定在多任务列表顶部，防止系统内存不足时回收进程。需跳转系统设置开启，<u>频繁断连的用户建议开启</u>。</div>
+          <div class="div"></div>
+          <div class="row"><div class="t"><b>通知权限<i class="why"></i></b></div><div class="v">已开启</div><i class="chev"></i></div>
+
+          <div class="sec-h">存储</div>
+          <div class="row"><div class="t"><b>接收文件保存目录<i class="why"></i></b><s class="v path">内部存储 / Download / CrossClip</s></div><span class="link-btn">更改</span></div>
+          <div class="div"></div>
+          <div class="row"><div class="t"><b>本地缓存<i class="why"></i></b></div><div class="v">128 MB</div><span class="link-btn">清除</span></div>
+
+          <div class="sec-h">系统权限</div>
+          <div class="row"><div class="t"><b>Shizuku 系统特权<i class="why"></i></b></div><div class="v">已激活 · v13.5.1</div></div>
+          <div class="div"></div>
+          <div class="row"><div class="t"><b>后台省电策略<i class="why"></i></b></div><span class="go">去设置</span><i class="chev"></i></div>
+          <div class="div"></div>
+          <div class="row"><div class="t"><b>自启动与后台复活<i class="why"></i></b></div><span class="go">去设置</span><i class="chev"></i></div>
+
+          <div class="diag-entry"><span class="diag-link">查看诊断日志与排查工具</span></div>
+          <div class="foot">CrossClip v2.1.2 · build 20260912</div>
+        </div>
+      </div>
+      <div class="caption"><b>01 / 设置</b><span>hub</span>
+        <i>同步组内只保留两个与同步直接相关的开关；加锁与两项系统权限统一为「去设置 ›」；诊断收进底部下划线入口。标题后的 ⓘ 为折叠说明，默认不占行高。</i></div>
+    </div>
+
+    <!-- ================= 屏 2：电脑配对 ================= -->
+    <div class="shot">
+      <div class="phone">
+        <div class="status"><span>9:41</span>
+          <div class="rt"><div class="bars"><i></i><i></i><i></i><i></i></div>
+            <svg width="15" height="11" viewBox="0 0 15 11" fill="none"><path d="M1 3.6a9 9 0 0 1 13 0M3.4 6.2a5.4 5.4 0 0 1 8.2 0M6.1 8.7a1.8 1.8 0 0 1 2.8 0" stroke="#16181D" stroke-width="1.3" stroke-linecap="round"/></svg>
+            <div class="batt"><i></i></div></div>
+        </div>
+        <div class="bar">
+          <div class="back"><svg width="10" height="17" viewBox="0 0 10 17" fill="none"><path d="M8.4 1.2 1.6 8.5l6.8 7.3" stroke="#16181D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h2>电脑配对</h2>
+        </div>
+        <div class="scroll pad">
+          <p class="lead">在同一局域网内打开 CrossClip 桌面端，选择下方设备并输入桌面端显示的 6 位固定配对码。</p>
+          <div class="sec-h">已发现的设备</div>
+          <div class="dev">
+            <div class="ic"><svg width="20" height="20" viewBox="0 0 20 20" fill="none"><rect x="1.6" y="3" width="16.8" height="11" rx="1.6" stroke="#16181D" stroke-width="1.4"/><path d="M7 17h6" stroke="#16181D" stroke-width="1.4" stroke-linecap="round"/></svg></div>
+            <div class="t"><b>WANG</b><s>10.140.146.57 · 刚刚在线</s></div>
+            <span class="badge live">在线</span>
+            <button class="btn-primary">连接</button>
+          </div>
+          <div class="div"></div>
+          <div class="dev off">
+            <div class="ic"><svg width="20" height="20" viewBox="0 0 20 20" fill="none"><rect x="1.6" y="3" width="16.8" height="11" rx="1.6" stroke="#16181D" stroke-width="1.4"/><path d="M7 17h6" stroke="#16181D" stroke-width="1.4" stroke-linecap="round"/></svg></div>
+            <div class="t"><b>LIU-PC</b><s>10.140.146.83 · 3 分钟前</s></div>
+            <span class="badge">离线</span>
+            <button class="btn-ghost">重连</button>
+          </div>
+          <div class="sec-h">手动添加</div>
+          <div class="field"><b>10.140.146.</b>___</div>
+          <div class="btn-row" style="padding-top:14px"><button class="btn-ghost">添加地址</button></div>
+          <div class="foot">需授予「附近设备」与「本地网络」权限</div>
+        </div>
+      </div>
+      <div class="caption"><b>02 / 电脑配对</b><span>device list</span>
+        <i>状态标签只有在线 / 离线两级，不做强弱分级；手动添加仅保留地址一种方式，避免同层级出现两个并列入口。</i></div>
+    </div>
+
+    <!-- ================= 屏 3：输入配对码 ================= -->
+    <div class="shot">
+      <div class="phone">
+        <div class="status"><span>9:41</span>
+          <div class="rt"><div class="bars"><i></i><i></i><i></i><i></i></div>
+            <svg width="15" height="11" viewBox="0 0 15 11" fill="none"><path d="M1 3.6a9 9 0 0 1 13 0M3.4 6.2a5.4 5.4 0 0 1 8.2 0M6.1 8.7a1.8 1.8 0 0 1 2.8 0" stroke="#16181D" stroke-width="1.3" stroke-linecap="round"/></svg>
+            <div class="batt"><i></i></div></div>
+        </div>
+        <div class="bar">
+          <div class="back"><svg width="10" height="17" viewBox="0 0 10 17" fill="none"><path d="M8.4 1.2 1.6 8.5l6.8 7.3" stroke="#16181D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h2>输入配对码</h2>
+        </div>
+        <div class="scroll pad">
+          <div class="center-hero">
+            <svg width="46" height="46" viewBox="0 0 46 46" fill="none"><rect x="6" y="12" width="34" height="24" rx="3" stroke="#16181D" stroke-width="1.6"/><path d="M16 41h14" stroke="#16181D" stroke-width="1.6" stroke-linecap="round"/><circle cx="23" cy="24" r="3.2" stroke="#16181D" stroke-width="1.6"/></svg>
+            <h3>桌面端正在请求配对</h3>
+            <p>在 <b>WANG</b> 上显示的 6 位配对码输入下方，<br>即可建立加密连接。</p>
+          </div>
+          <div class="boxes">
+            <div class="filled">6</div>
+            <div class="cursor"></div>
+            <div></div><div></div><div></div><div></div>
+          </div>
+          <div class="hint">桌面端配对码为固定 6 位，输入错误将自动清空</div>
+          <div class="actions"><button class="btn-primary">确认配对</button></div>
+          <div class="sub-act">未看到配对码？重新搜索设备</div>
+          <div class="summary" style="margin-top:26px">
+            <div><b>E2EE</b><s>端到端加密</s></div>
+            <div><b>LAN</b><s>仅局域网</s></div>
+            <div><b>固定</b><s>配对码</s></div>
+          </div>
+          <div class="foot">连接建立后可在「设置 › 同步」中调整自动互传</div>
+        </div>
+      </div>
+      <div class="caption"><b>03 / 输入配对码</b><span>pairing</span>
+        <i>桌面端为固定码，故不设倒计时；6 位填满即校验，不匹配则边框转红、抖动一次并在 0.4 秒内自动清空，避免用户在错误码上反复补位。</i></div>
+    </div>
+
+    <!-- ================= 屏 4：诊断与排查 ================= -->
+    <div class="shot">
+      <div class="phone">
+        <div class="status"><span>9:41</span>
+          <div class="rt"><div class="bars"><i></i><i></i><i></i><i></i></div>
+            <svg width="15" height="11" viewBox="0 0 15 11" fill="none"><path d="M1 3.6a9 9 0 0 1 13 0M3.4 6.2a5.4 5.4 0 0 1 8.2 0M6.1 8.7a1.8 1.8 0 0 1 2.8 0" stroke="#16181D" stroke-width="1.3" stroke-linecap="round"/></svg>
+            <div class="batt"><i></i></div></div>
+        </div>
+        <div class="bar">
+          <div class="back"><svg width="10" height="17" viewBox="0 0 10 17" fill="none"><path d="M8.4 1.2 1.6 8.5l6.8 7.3" stroke="#16181D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h2>诊断与排查工具</h2>
+          <div class="act">筛选</div>
+        </div>
+        <div class="scroll pad">
+          <div class="chips">
+            <span class="chip on">全部</span><span class="chip">同步</span><span class="chip">网络</span><span class="chip err">错误 4</span>
+          </div>
+          <div class="logbox">
+<div><span class="ts">09:41:02.118</span> <span class="info">INFO</span> <span class="dim">Clipboard watcher started</span></div>
+<div><span class="ts">09:41:02.204</span> <span class="ok">OK&nbsp;&nbsp;</span> <span class="dim">Shizuku privileged service bound</span></div>
+<div><span class="ts">09:41:03.771</span> <span class="ok">OK&nbsp;&nbsp;</span> <span class="dim">Peer handshake WANG@10.140.146.57</span></div>
+<div><span class="ts">09:41:05.019</span> <span class="info">INFO</span> <span class="dim">Push text/plain · 1 item · 42 B</span></div>
+<div><span class="ts">09:41:06.402</span> <span class="info">INFO</span> <span class="dim">Recv image/png · 1 item · 1.8 MB</span></div>
+<div><span class="ts">09:41:07.884</span> <span class="warn">WARN</span> <span class="dim">Battery optimise not ignored</span></div>
+<div><span class="ts">09:41:09.412</span> <span class="err">ERR&nbsp;</span> <span class="dim">TLS verify failed: cert not trusted</span></div>
+<div><span class="ts">09:41:09.415</span> <span class="err">ERR&nbsp;</span> <span class="dim">Retry 1/3 in 800 ms</span></div>
+<div><span class="ts">09:41:10.226</span> <span class="ok">OK&nbsp;&nbsp;</span> <span class="dim">Fallback to LAN session key</span></div>
+<div><span class="ts">09:41:12.507</span> <span class="warn">WARN</span> <span class="dim">Clipboard masked by foreground app</span></div>
+<div><span class="ts">09:41:15.664</span> <span class="ok">OK&nbsp;&nbsp;</span> <span class="dim">Checksum matched · sha256 4f9a…c21e</span></div>
+<div><span class="ts">09:41:18.309</span> <span class="info">INFO</span> <span class="dim">Recent-task visibility hidden</span></div>
+          </div>
+          <div class="summary">
+            <div><b>4</b><s>错误</s></div>
+            <div><b>2</b><s>警告</s></div>
+            <div><b>12</b><s>总行数</s></div>
+          </div>
+          <div class="sec-h">日志路径</div>
+          <div class="row"><div class="t"><b class="v path" style="text-align:left;font-size:12.5px;font-weight:500">/sdcard/Android/data/…/files/logs</b></div></div>
+          <div class="btn-row">
+            <button class="btn-ghost">复制</button>
+            <button class="btn-ghost">导出 .txt</button>
+            <button class="btn-ghost">分享</button>
+          </div>
+          <div class="danger-row"><span>清空日志</span><em>2.4 MB</em></div>
+          <div class="foot">日志不含剪贴板正文内容</div>
+        </div>
+      </div>
+      <div class="caption"><b>04 / 诊断与排查工具</b><span>secondary page</span>
+        <i>二级页只保留连接与文件相关记录，不再展示保留时长与网络延迟统计；日志路径为蓝色可点击，保存目录长按可选应用打开。</i></div>
+    </div>
+
+  </div>
+
+  <!-- ================= 设计令牌 ================= -->
+  <div class="spec">
+    <h4>设计令牌 Design Tokens（v2）</h4>
+    <p class="note">新增两类规范：<b>可点击路径使用 --link #1668CE</b>（唯一例外于「一种强调色」原则，因为它承载的是链接语义而非状态语义，且仅出现在路径文本）；<b>ⓘ 折叠说明</b>用于解释「要不要开」，默认零行高占用。</p>
+    <div class="grid">
+      <div class="blk">
+        <h5>色彩</h5>
+        <div class="swatches">
+          <div><i style="background:#16181D"></i><s>#16181D<br>主文字 / 主按钮</s></div>
+          <div><i style="background:#0E7C66"></i><s>#0E7C66<br>连接 / 开关开</s></div>
+          <div><i style="background:#1668CE"></i><s>#1668CE<br>可点击路径</s></div>
+          <div><i style="background:#C2453A"></i><s>#C2453A<br>仅用于破坏性</s></div>
+          <div><i style="background:#A0A6B0"></i><s>#A0A6B0<br>三级文字</s></div>
+        </div>
+      </div>
+      <div class="blk">
+        <h5>字号 / 字重</h5>
+        <div class="type-row"><em>25 / 650</em><span>页面主标题（设备名）</span></div>
+        <div class="type-row"><em>15 / 500</em><span>列表行标题</span></div>
+        <div class="type-row"><em>12.5 / 400</em><span>行副说明 #A0A6B0</span></div>
+        <div class="type-row"><em>12.5 / 400</em><span>ⓘ 展开说明 #6E7480</span></div>
+        <div class="type-row"><em>11.5 / 600</em><span>分组标题 · 字距 .1em</span></div>
+        <div class="type-row"><em>mono 12.5</em><span>IP、路径、配对码</span></div>
+      </div>
+      <div class="blk">
+        <h5>ⓘ 功能说明规范</h5>
+        <div class="tok"><em>13px</em><span>圆形描边 i，与标题同一行，<b>不增加行高</b></span></div>
+        <div class="tok"><em>#A0A6B0</em><span>默认态；选中时反白为石墨黑</span></div>
+        <div class="tok"><em>10 / 12</em><span>说明条内边距，灰底 #F7F7F8 + 1px 细边</span></div>
+        <div class="tok"><em>句尾加粗</em><span>用 &lt;u&gt; 强调「建议开启 / 可关闭」结论</span></div>
+        <div class="tok"><em>互斥</em><span>同时只允许展开一条，避免页面被撑长</span></div>
+      </div>
+      <div class="blk">
+        <h5>状态与入口语义</h5>
+        <div class="tok"><em>在线/离线</em><span>设备状态二值化，去掉强弱分级</span></div>
+        <div class="tok"><em>去设置 ›</em><span>需跳系统页的项，右侧统一文案</span></div>
+        <div class="tok"><em>蓝色路径</em><span>点击=打开；长按=选择应用</span></div>
+        <div class="tok"><em>下划线入口</em><span>二级页入口居中置于列表末尾</span></div>
+        <div class="tok"><em>错误即清空</em><span>配对码不匹配：标红 + 抖动 + 自动清空</span></div>
+      </div>
+      <div class="blk">
+        <h5>明令禁止（去 AI 味）</h5>
+        <p class="dont">
+          <b>✕</b> 高饱和蓝 #2F6BFF 铺满按钮与图标<br>
+          <b>✕</b> 20px 以上大圆角「药丸卡片」<br>
+          <b>✕</b> emoji 当功能图标 / 彩色渐变图标块<br>
+          <b>✕</b> 每分组各用一个色相<br>
+          <b>✕</b> 大范围柔和投影 + 发光<br>
+          <b>✕</b> 一行一个「蓝色小按钮」的按钮墙<br>
+          <b>✕</b> 常驻两段式副标题（会撑高每行）
+        </p>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
