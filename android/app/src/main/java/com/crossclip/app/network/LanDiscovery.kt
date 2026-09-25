@@ -340,14 +340,16 @@ class LanDiscovery(
                 // 1. 向所有广播地址发送 UDP DISCOVER 探测
                 val broadcastAddrs = getBroadcastAddresses()
                 val broadcastTimes = if (round == 0) 2 else 1
-                repeat(broadcastTimes) {
+                var broadcastRound = 0
+                while (broadcastRound < broadcastTimes && isSearching) {
                     for (addr in broadcastAddrs) {
                         try {
                             val packet = DatagramPacket(reqMsg, reqMsg.size, addr, udpPort)
                             socket?.send(packet)
                         } catch (_: Exception) {}
                     }
-                    if (broadcastTimes > 1) {
+                    broadcastRound++
+                    if (broadcastRound < broadcastTimes) {
                         try { Thread.sleep(200) } catch (_: InterruptedException) { break }
                     }
                 }
