@@ -14,7 +14,17 @@ class SseClient(
     // 手机端据此丢弃重复投递（SSE 与 HTTP 兜底双通道各送一次同一条内容）与在途旧事件。
     private val onMessageReceived: (encrypted: String, lamportClock: Long, senderId: String) -> Unit,
     private val onConnectionChanged: (Boolean) -> Unit,
-    private val onFileEvent: ((eventType: String, data: JSONObject) -> Unit)? = null
+    private val onFileEvent: ((eventType: String, data: JSONObject) -> Unit)? = null,
+    /**
+     * 自动重连调度：返回下一次重试前应等待的毫秒数；返回 null 表示重连循环立即退出。
+     *
+     * 服务端传入与 LanDiscovery 省电窗口同一张时间表：已连接时 2 秒快速重连；
+     * 未连接时跟随搜索窗口分级降频（0-5 分钟 2 秒 / 5-9 分钟 1 分钟 /
+     * 9-15 分钟 2 分钟），15 分钟窗口关闭后返回 null。搜索已降频而重连仍每 2 秒
+     * 对着关机的电脑发起 TCP 连接，纯属白白唤醒射频芯片——「夜间已停止扫描、
+     * 早上电脑一开机却秒连」这种违背省电设计的行为正来源于此。
+     */
+    private val nextRetryDelayMs: (() -> Long?)? = null
 ) {
     private val TAG = "CrossClipSSE"
     @Volatile
@@ -22,6 +32,17 @@ class SseClient(
     private var thread: Thread? = null
     @Volatile
     private var currentCall: Call? = null
+
+    /**
+     * 当前（或最近一次）连接的目标 URL。
+     *
+     * 服务层在 SSE 连接建立但握手状态缺失时（见 SyncForegroundService 的
+     * 补握手逻辑），需要从这里反解出实际连上的电脑地址——SSE 重连线程绕过了
+     * 正常握手流程，服务层并不知道这次连的是谁。
+     */
+    @Volatile
+    var activeUrl: String = ""
+        private set
     // 代际标记：connect/disconnect 都会使其自增。读线程只认自己启动时的那一代，
     // 一旦被取代就静默退出——不上报状态、不处理数据、不重试，杜绝僵尸连接
     private val generation = AtomicInteger(0)
@@ -38,6 +59,7 @@ class SseClient(
     fun connect(url: String) {
         disconnect()
         isClosed = false
+        activeUrl = url
         val myGen = generation.incrementAndGet()
 
         thread = Thread {
@@ -50,6 +72,15 @@ class SseClient(
                 .build()
 
             while (isActive(myGen)) {
+                // 重连调度：每一轮开头取一次当前窗口阶段对应的间隔。搜索窗口已关闭
+                // （15 分钟超时 / 自动搜索关停）且未连接时返回 null，退出重连循环。
+                // 恢复路径由上层负责——用户「重新扫描」或重新握手成功后会再次调用
+                // connect() 拉起新一代连接线程。
+                val retryDelayMs = nextRetryDelayMs?.invoke()
+                if (nextRetryDelayMs != null && retryDelayMs == null) {
+                    DebugLogger.log("SSE", "搜索窗口已关闭且未连接，停止 SSE 自动重连（等待用户手动触发）")
+                    break
+                }
                 var call: Call? = null
                 try {
                     call = client.newCall(request)
@@ -126,11 +157,12 @@ class SseClient(
                         currentCall = null
                     }
                     if (isActive(myGen)) {
-                        Log.w(TAG, "SSE 连接异常断开: ${e.message}，将在 2 秒后自动重连...")
-                        DebugLogger.log("SSE", "SSE 异常断开: ${e.javaClass.simpleName}: ${e.message}，2 秒后重试", e)
+                        val delayMs = retryDelayMs ?: 2000L
+                        Log.w(TAG, "SSE 连接异常断开: ${e.message}，将在 ${delayMs / 1000} 秒后自动重连...")
+                        DebugLogger.log("SSE", "SSE 异常断开: ${e.javaClass.simpleName}: ${e.message}，${delayMs / 1000} 秒后重试", e)
                         onConnectionChanged(false)
                         try {
-                            Thread.sleep(2000)
+                            Thread.sleep(delayMs)
                         } catch (_: InterruptedException) {
                             break
                         }

@@ -21,11 +21,7 @@ fn sanitize_host_name(name: &str) -> String {
     }
 }
 
-pub fn start_mdns_broadcast(
-    device_name: &str,
-    port: u16,
-    device_id: &str,
-) -> Option<ServiceDaemon> {
+pub fn start_mdns_broadcast(device_name: &str, port: u16, device_id: &str) -> Option<ServiceDaemon> {
     let mdns = ServiceDaemon::new().ok()?;
     let service_type = "_crossclip._tcp.local.";
     let instance_name = device_name;
@@ -36,10 +32,7 @@ pub fn start_mdns_broadcast(
     properties.insert("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
 
     let lan_ips = crate::ip_util::get_local_lan_ips();
-    let bind_ip = lan_ips
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let bind_ip = lan_ips.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
 
     let my_service = ServiceInfo::new(
         service_type,
@@ -61,12 +54,7 @@ pub fn start_mdns_broadcast(
         );
         Some(mdns)
     } else {
-        log_warn!(
-            "mDNS",
-            "注册局域网服务失败: {}.{}",
-            instance_name,
-            service_type
-        );
+        log_warn!("mDNS", "注册局域网服务失败: {}.{}", instance_name, service_type);
         None
     }
 }
