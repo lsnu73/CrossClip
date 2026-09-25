@@ -38,6 +38,16 @@ class LanDiscovery(
         .readTimeout(500, TimeUnit.MILLISECONDS)
         .build()
 
+    /** 首轮扫描专用客户端：冷启动时 Wi-Fi/电脑端可能有数百毫秒抖动，超时放宽到 1200ms */
+    private val httpClientFirstRound = OkHttpClient.Builder()
+        .connectTimeout(1200, TimeUnit.MILLISECONDS)
+        .readTimeout(1200, TimeUnit.MILLISECONDS)
+        .build()
+
+    /** 是否处于「刚启动、尚未发现任何设备」的首轮扫描阶段 */
+    @Volatile
+    private var firstRoundActive = false
+
     private fun acquireMulticastLock() {
         try {
             val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -206,6 +216,32 @@ class LanDiscovery(
         }
     }
 
+    /**
+     * 确保 UDP socket 已创建并完成 bind。必须在调用线程**同步**执行成功后再开始扫描，
+     * 否则冷启动时「绑定 socket」与「首轮全子网探测 / 广播」存在竞态：
+     * 首轮 probeIp 与 DISCOVER 广播可能在 socket 就绪前发出，整轮扫描静默作废，
+     * 表现为「第一次总是搜索失败，第二次重新扫描才成功」。
+     */
+    private fun ensureSocketBound(): Boolean {
+        if (socket != null) return true
+        return try {
+            socket = DatagramSocket(null).apply {
+                reuseAddress = true
+                broadcast = true
+                bind(java.net.InetSocketAddress(udpPort))
+            }
+            true
+        } catch (e: Exception) {
+            try {
+                socket = DatagramSocket().apply { broadcast = true }
+                true
+            } catch (ex: Exception) {
+                Log.e(TAG, "创建 UDP Socket 失败: ${ex.message}")
+                false
+            }
+        }
+    }
+
     fun startDiscovery(
         deviceId: String = "android",
         deviceName: String = "安卓手机",
@@ -213,6 +249,11 @@ class LanDiscovery(
         manualScan: Boolean = false
     ) {
         if (isSearching) return
+        // 1. 同步完成 socket bind，确保下面的探测与广播发出时 socket 已可用
+        if (!ensureSocketBound()) {
+            isSearching = false
+            return
+        }
         isSearching = true
         currentHintIp = hintIp
         currentDeviceId = deviceId
@@ -225,22 +266,9 @@ class LanDiscovery(
             scanExecutor = Executors.newFixedThreadPool(16)
         }
 
-        // 1. 启动 UDP 广播探测与应答监听
+        // 2. 启动 UDP 广播探测与应答监听（socket 已就绪，直接开始）
         Thread {
-            try {
-                socket = DatagramSocket(null).apply {
-                    reuseAddress = true
-                    broadcast = true
-                    bind(java.net.InetSocketAddress(udpPort))
-                }
-            } catch (e: Exception) {
-                try {
-                    socket = DatagramSocket().apply { broadcast = true }
-                } catch (ex: Exception) {
-                    Log.e(TAG, "创建 UDP Socket 失败: ${ex.message}")
-                }
-            }
-
+            firstRoundActive = true
             // 监听应答线程
             Thread {
                 val buf = ByteArray(2048)
@@ -289,6 +317,7 @@ class LanDiscovery(
                             }
 
                             Log.i(TAG, "通过 UDP 发现电脑: $pcName ($actualDevId) -> $targetIp:$httpPort")
+                            firstRoundActive = false
                             onDeviceFound(actualDevId, pcName, targetIp, httpPort, wsPort)
                         }
                     } catch (e: Exception) {
@@ -304,14 +333,23 @@ class LanDiscovery(
                 put("device_name", deviceName)
             }.toString().toByteArray(Charsets.UTF_8)
 
+            // 冷启动补一轮：部分 ROM / Wi-Fi 对刚 bind 的 socket 首包广播有丢弃现象，
+            // 首轮连发两次提高首次命中率，避免「第一次必失败、第二次才成功」
+            var round = 0
             while (isSearching) {
                 // 1. 向所有广播地址发送 UDP DISCOVER 探测
                 val broadcastAddrs = getBroadcastAddresses()
-                for (addr in broadcastAddrs) {
-                    try {
-                        val packet = DatagramPacket(reqMsg, reqMsg.size, addr, udpPort)
-                        socket?.send(packet)
-                    } catch (_: Exception) {}
+                val broadcastTimes = if (round == 0) 2 else 1
+                repeat(broadcastTimes) {
+                    for (addr in broadcastAddrs) {
+                        try {
+                            val packet = DatagramPacket(reqMsg, reqMsg.size, addr, udpPort)
+                            socket?.send(packet)
+                        } catch (_: Exception) {}
+                    }
+                    if (broadcastTimes > 1) {
+                        try { Thread.sleep(200) } catch (_: InterruptedException) { break }
+                    }
                 }
 
                 // 2. 已连接：转入低频保活（8 秒一轮），仅用于感知网络变化与 IP 漂移
@@ -321,11 +359,13 @@ class LanDiscovery(
                     } catch (e: InterruptedException) {
                         break
                     }
+                    round++
                     continue
                 }
 
                 // 3. 未连接：并发探测当前子网全部 IP
                 fastSubnetScan()
+                round++
 
                 // 4. 自动搜索已关闭：仅完成手动扫描的有限轮数后停止
                 if (!autoSearchEnabled) {
@@ -421,12 +461,15 @@ class LanDiscovery(
     }
 
     private fun probeIp(targetIp: String) {
+        // 首轮（刚启动还没发现任何设备）用更宽容的 1200ms 客户端，
+        // 避免冷启动 Wi-Fi / 电脑端轻微抖动导致整轮 254 个探测全部超时被误判为「搜索失败」
+        val client = if (firstRoundActive) httpClientFirstRound else httpClient
         try {
             val req = Request.Builder()
                 .url("http://$targetIp:18236/ping")
                 .get()
                 .build()
-            val resp = httpClient.newCall(req).execute()
+            val resp = client.newCall(req).execute()
             if (resp.isSuccessful) {
                 val bodyStr = resp.body?.string() ?: ""
                 val json = JSONObject(bodyStr)
@@ -435,6 +478,7 @@ class LanDiscovery(
                 // 排除自身 ID 以及任何包含 android 前缀的设备
                 if (!devId.startsWith("android_") && devId != currentDeviceId) {
                     Log.i(TAG, "通过主动探测发现电脑: $devName ($devId) -> $targetIp:18236")
+                    firstRoundActive = false
                     onDeviceFound(devId, devName, targetIp, 18236, 18238)
                 }
             }

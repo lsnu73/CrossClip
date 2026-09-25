@@ -265,11 +265,8 @@ class SyncForegroundService : Service() {
         ShizukuClipboardManager.init(applicationContext)
         ShizukuPrivilegeHelper.applySystemWhitelists(applicationContext)
 
-        // 清理上次运行残留的中转文件，防止缓存无限膨胀：
-        //  - 接收临时目录：进程中途被杀时 .tmp 会残留，且中断的传输不支持续传，全清安全；
-        //  - 分享中转目录：只清超过 24 小时的陈旧副本，避免误删仍在后台上传中的文件。
-        FileReceiver.cleanupTempFiles(applicationContext)
-        ShareReceiveActivity.cleanupShareTempFiles(applicationContext)
+        // 缓存不再自动清理：是否清理由用户在「主界面 → 本地缓存」手动触发，
+        // 避免用户未感知的情况下删除中转/分享残留文件。
 
         clipboardManager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         clipboardManager.addPrimaryClipChangedListener(clipListener)

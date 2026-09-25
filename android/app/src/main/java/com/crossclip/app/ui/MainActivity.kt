@@ -539,7 +539,7 @@ class MainActivity : AppCompatActivity() {
     private fun AlertDialog.Builder.setDescription(bytes: Long): AlertDialog.Builder {
         val mb = bytes / (1024.0 * 1024.0)
         val shown = if (mb >= 1) String.format(Locale.getDefault(), "%.1f MB", mb) else "${bytes / 1024} KB"
-        setMessage("将删除 $shown 临时文件，不会删除已保存的接收文件。")
+        setMessage("将删除 $shown 临时文件（含传输中断的残留分块与分享中转副本），不会删除已保存的接收文件。")
         return this
     }
 
