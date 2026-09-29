@@ -216,6 +216,18 @@ class SyncForegroundService : Service() {
     @Volatile
     private var manualDisconnected = false
 
+    /**
+     * 「电脑配对」页是否正处于打开状态。
+     *
+     * 置位期间发现电脑只登记进设备列表、**绝不自动握手** —— 连接必须由用户在列表上
+     * 点「连接」（selectTargetDevice → PIN 屏）发起。这是配对页的交互契约：用户明确
+     * 进入配对页就是想自己挑选电脑，此刻若后台仍替他做决定（发现记忆中的电脑就自动
+     * 接上），就会出现「没点连接、退回首页却已显示已连接」的困惑行为。
+     * 页面打开/关闭分别由 [beginPairingSearch] / [endPairingSearch] 维护。
+     */
+    @Volatile
+    private var pairingModeActive = false
+
     @Volatile
     private var selfTestWriteInProgress = false
     private var wakeLock: PowerManager.WakeLock? = null
@@ -697,6 +709,10 @@ class SyncForegroundService : Service() {
             nextRetryDelayMs = {
                 when {
                     connectionState == 1 -> 2000L
+                    // 配对页打开期间冻结 SSE 自动复活：用户正在配对页挑选电脑，此刻长连接
+                    // 自行接通会让「没点连接却也显示已连接」，违背配对页交互契约
+                    // （见 pairingModeActive）。页面关闭后由 endPairingSearch 恢复常规窗口。
+                    pairingModeActive -> null
                     this::lanDiscovery.isInitialized -> lanDiscovery.currentAutoRetryIntervalMs()
                     else -> 2000L
                 }
@@ -967,6 +983,67 @@ class SyncForegroundService : Service() {
         lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp, manualScan = !autoSearchEnabled)
     }
 
+    // ==================== 电脑配对页的搜索控制 ====================
+
+    /**
+     * 进入「电脑配对」页：开启连续搜索模式（页面打开期间一直搜索）。
+     *
+     * 两条发现通道都**重启**而非仅补拉起：后台自动搜索此刻可能正睡在降频的长间隔里
+     * （最长 2 分钟一轮），仅置位 continuousSearchMode 要等这一觉睡醒才开始下一轮，
+     * 用户进页面就会先看到几十秒「转圈却无动作」的假死。重启让首轮扫描立即执行。
+     *
+     * 配对模式下发现设备只登记不连接（见 [pairingModeActive]），连接必须由用户点「连接」。
+     */
+    fun beginPairingSearch() {
+        pairingModeActive = true
+        DebugLogger.log("DISCOVERY", "进入电脑配对页：开启连续搜索（发现设备仅列入清单，连接等待用户点击）")
+        restartDiscoveryChannels()
+    }
+
+    /**
+     * 用户在配对页点「停止搜索」：彻底停下两条发现通道，等待用户点「开始搜索」。
+     * 通知栏随之显示「搜索已暂停」（与自动搜索 15 分钟超时同一文案来源）。
+     */
+    fun stopPairingSearch() {
+        DebugLogger.log("DISCOVERY", "配对页用户主动停止搜索")
+        try { nsdHelper.stopDiscovery() } catch (_: Exception) {}
+        try { lanDiscovery.stopDiscovery() } catch (_: Exception) {}
+        mainHandler.post { updateNotification(statusTextForNotification()) }
+    }
+
+    /**
+     * 离开「电脑配对」页：退出配对模式，把搜索交还常规后台策略。
+     *
+     * @param userStopped 用户是否刚点过「停止搜索」。是则尊重这一显式决定，
+     *   离开页面后保持「搜索已暂停」终态（不悄悄恢复后台搜索）；否则若自动搜索
+     *   开关开启，重置省电时间窗并确保后台搜索在跑（回到 0-5/5-9/9-15 分钟降频节奏）。
+     */
+    fun endPairingSearch(userStopped: Boolean) {
+        pairingModeActive = false
+        lanDiscovery.continuousSearchMode = false
+        DebugLogger.log("DISCOVERY", "离开电脑配对页（userStopped=$userStopped）：退出配对模式")
+        if (userStopped) {
+            // 用户已显式停止；这里兜底再停一次，防泄漏（幂等）
+            try { nsdHelper.stopDiscovery() } catch (_: Exception) {}
+            try { lanDiscovery.stopDiscovery() } catch (_: Exception) {}
+        } else if (autoSearchEnabled) {
+            // 恢复常规后台搜索：重置 5/9/15 分钟时间窗，从现在重新计时
+            lanDiscovery.restartAutoSearchWindow()
+            if (!lanDiscovery.isSearching) {
+                restartDiscoveryChannels()
+            }
+        }
+        mainHandler.post { updateNotification(statusTextForNotification()) }
+    }
+
+    /** 重启两条发现通道（先彻底释放旧 socket / mDNS 监听，再以当前模式重新拉起） */
+    private fun restartDiscoveryChannels() {
+        try { nsdHelper.stopDiscovery() } catch (_: Exception) {}
+        try { lanDiscovery.stopDiscovery() } catch (_: Exception) {}
+        nsdHelper.startDiscovery()
+        lanDiscovery.startDiscovery(deviceId, deviceName, lastSavedPcIp, manualScan = false)
+    }
+
     /**
      * 清除本地持久化的历史电脑与 PIN 码记录
      */
@@ -995,8 +1072,8 @@ class SyncForegroundService : Service() {
     }
 
     private fun onDeviceDiscovered(devId: String, name: String, ip: String, httpPort: Int) {
-        if (manualDisconnected) {
-            // 用户刚手动断开：忽略任何扫描结果，不自动重连（要连由用户点「重新扫描」发起）
+        if (!pairingModeActive && manualDisconnected) {
+            // 用户刚手动断开：忽略任何扫描结果，不自动重连（要连由用户在配对页点「连接」发起）
             DebugLogger.log("DISCOVERY", "已手动断开连接，忽略扫描结果: $name ($ip)")
             return
         }
@@ -1050,7 +1127,16 @@ class SyncForegroundService : Service() {
             return
         }
 
-        // 2. 若未连接，检查是否为记忆中的目标电脑，若是则自动触发后台静默握手
+        // 2. 配对页搜索期间：只登记不连接 —— 连接必须由用户在列表上点「连接」发起
+        //    （交互契约见 pairingModeActive）。该闸门必须在自动握手之前：
+        //    手动断开后的用户正是要在配对页里找到电脑再手动点「连接」，
+        //    若在登记前早退，列表会永远为空。
+        if (pairingModeActive) {
+            DebugLogger.log("DISCOVERY", "配对页搜索中，发现设备但等待用户点击「连接」: $name ($ip)")
+            return
+        }
+
+        // 3. 若未连接，检查是否为记忆中的目标电脑，若是则自动触发后台静默握手
         //    前提：搜索窗口仍开着。mDNS 监听（NsdHelper）是常驻的，不随
         //    「15 分钟停止」关闭——若不拦住，电脑一开机就会被 mDNS 发现 → 自动握手
         //    → 自动连接，「停止搜索等待手动触发」的省电设计形同虚设

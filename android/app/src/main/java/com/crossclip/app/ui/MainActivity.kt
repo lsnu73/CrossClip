@@ -8,11 +8,13 @@ import android.content.pm.PackageManager
 import android.app.AlertDialog
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.provider.Settings
 import android.view.View
 import android.widget.TextView
 import android.widget.Toast
@@ -144,6 +146,7 @@ class MainActivity : AppCompatActivity() {
         applyHideFromRecentsPreference()
         startSyncService()
         startStatusPolling()
+        promptEnableWifiIfNeeded()
         promptMiuiKeepAliveIfNeeded()
     }
 
@@ -665,6 +668,61 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ==================== 服务与生命周期 ====================
+
+    // ==================== Wi-Fi 状态引导 ====================
+
+    /** 本次进程是否已弹过「开启 Wi-Fi」引导：避免用户每次回到 App 都被弹窗打扰 */
+    private var wifiPromptShown = false
+
+    /**
+     * 进入软件时检查 Wi-Fi 开关：未开启则弹窗征求用户同意，引导开启。
+     *
+     * CrossClip 的剪贴板与文件同步全部走 Wi-Fi 局域网，Wi-Fi 关着时搜索必然空转。
+     * Android 10+ 已禁止应用静默开关 Wi-Fi（setWifiEnabled 对非系统应用失效），
+     * 统一跳转系统「互联网连接」面板（Settings.Panel），由用户在系统界面拨动开关
+     * 完成授权；Android 9 及以下在用户于本弹窗中明确同意后可直接程序化开启。
+     */
+    private fun promptEnableWifiIfNeeded() {
+        if (wifiPromptShown) return
+        val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+        if (wifiManager.isWifiEnabled) return
+        wifiPromptShown = true
+        DebugLogger.log("APP_LIFECYCLE", "检测到 Wi-Fi 未开启，弹窗引导用户开启")
+        AlertDialog.Builder(this)
+            .setTitle("开启 Wi-Fi")
+            .setMessage("CrossClip 通过 Wi-Fi 局域网与电脑互传剪贴板和文件。\n当前 Wi-Fi 未开启，是否前往开启？")
+            .setPositiveButton("开启 Wi-Fi") { _, _ -> openWifiControlPanel() }
+            .setNegativeButton("暂不", null)
+            .show()
+    }
+
+    private fun openWifiControlPanel() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10+ 无法程序化开 Wi-Fi：调起系统「互联网连接」面板，由用户拨动开关授权
+                startActivity(Intent(Settings.Panel.ACTION_INTERNET_CONNECTIVITY))
+            } else {
+                val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                // Android 9 及以下：用户已在弹窗中同意，直接程序化开启（API 29 起该能力被移除）
+                @Suppress("DEPRECATION")
+                val opened = wifiManager?.setWifiEnabled(true) ?: false
+                DebugLogger.log("APP_LIFECYCLE", "程序化开启 Wi-Fi: $opened")
+                if (!opened) openWirelessSettings()
+            }
+        } catch (e: Exception) {
+            DebugLogger.warn("APP_LIFECYCLE", "打开 Wi-Fi 面板失败: ${e.message}")
+            openWirelessSettings()
+        }
+    }
+
+    /** 面板/直开失败时的兜底：跳系统无线设置页 */
+    private fun openWirelessSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+        } catch (_: Exception) {
+            Toast.makeText(this, "请在系统设置中开启 Wi-Fi", Toast.LENGTH_LONG).show()
+        }
+    }
 
     private fun startSyncService() {
         val intent = Intent(this, SyncForegroundService::class.java)

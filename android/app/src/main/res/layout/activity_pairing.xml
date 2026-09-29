@@ -66,34 +66,69 @@
                 android:lineSpacingExtra="3dp"
                 android:textColor="@color/text_2" />
 
-            <!-- 扫描态：13px 圆环 + 文案 -->
+            <!-- 搜索态：转圈 + 文案 + 超 10 秒引导 + 「停止搜索」。
+                 配对页打开期间连续搜索（不降频、不超时），直到用户点停止或发现设备 -->
             <LinearLayout
                 android:id="@+id/scan_container"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
+                android:orientation="vertical"
                 android:paddingStart="20dp"
                 android:paddingTop="16dp"
                 android:paddingEnd="20dp"
                 android:paddingBottom="16dp">
 
-                <ProgressBar
-                    android:layout_width="13dp"
-                    android:layout_height="13dp"
-                    android:indeterminateTint="@color/text_2"
-                    android:indeterminate="true" />
-
-                <TextView
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:text="正在搜索局域网内的电脑…"
-                    android:textSize="13.5sp"
-                    android:textColor="@color/text_2" />
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <ProgressBar
+                        android:layout_width="13dp"
+                        android:layout_height="13dp"
+                        android:indeterminateTint="@color/text_2"
+                        android:indeterminate="true" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:text="正在搜索局域网内的电脑…"
+                        android:textSize="13.5sp"
+                        android:textColor="@color/text_2" />
+                </LinearLayout>
+
+                <!-- 搜索超过 10 秒仍未发现：引导用户点「停止搜索」自行排查 -->
+                <TextView
+                    android:id="@+id/tv_scan_overtime_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:lineSpacingExtra="3dp"
+                    android:text="超过 10 秒仍未发现电脑？可点击下方「停止搜索」按钮"
+                    android:textSize="12.5sp"
+                    android:textColor="@color/text_3"
+                    android:visibility="gone" />
+
+                <androidx.appcompat.widget.AppCompatButton
+                    android:id="@+id/btn_stop_search"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginTop="12dp"
+                    android:paddingStart="18dp"
+                    android:paddingEnd="18dp"
+                    android:background="@drawable/bg_btn_ghost"
+                    android:text="停止搜索"
+                    android:textAllCaps="false"
+                    android:textSize="13sp"
+                    android:textColor="#FFFFFF"
+                    android:stateListAnimator="@null"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp" />
             </LinearLayout>
 
-            <!-- 空态：扫描结束仍无设备 -->
+            <!-- 停止态：用户点过「停止搜索」（或搜索被暂停）——给出排查指引与「开始搜索」 -->
             <LinearLayout
                 android:id="@+id/empty_state"
                 android:layout_width="match_parent"
@@ -111,19 +146,20 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:gravity="center"
-                    android:text="未发现在线电脑"
+                    android:lineSpacingExtra="3dp"
+                    android:text="按下按钮搜索局域网内的电脑\n请确认电脑端 CrossClip 已启动，且手机与电脑在同一局域网"
                     android:textSize="13.5sp"
                     android:textColor="@color/text_3" />
 
                 <androidx.appcompat.widget.AppCompatButton
-                    android:id="@+id/btn_rescan_empty"
+                    android:id="@+id/btn_start_search"
                     android:layout_width="wrap_content"
                     android:layout_height="36dp"
                     android:layout_marginTop="12dp"
                     android:paddingStart="18dp"
                     android:paddingEnd="18dp"
                     android:background="@drawable/bg_btn_ghost"
-                    android:text="重新扫描"
+                    android:text="开始搜索"
                     android:textAllCaps="false"
                     android:textSize="13sp"
                     android:textColor="#FFFFFF"
@@ -157,6 +193,33 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical" />
+
+                <!-- 列表非空时搜索仍在后台持续（发现新设备会自动加入） -->
+                <LinearLayout
+                    android:id="@+id/searching_footer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingStart="20dp"
+                    android:paddingTop="12dp"
+                    android:paddingEnd="20dp"
+                    android:visibility="gone">
+
+                    <ProgressBar
+                        android:layout_width="13dp"
+                        android:layout_height="13dp"
+                        android:indeterminateTint="@color/text_3"
+                        android:indeterminate="true" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:text="持续搜索中，发现新设备会自动加入"
+                        android:textSize="12.5sp"
+                        android:textColor="@color/text_3" />
+                </LinearLayout>
             </LinearLayout>
 
             <!-- 手动添加 -->

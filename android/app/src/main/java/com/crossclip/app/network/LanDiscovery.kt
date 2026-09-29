@@ -132,6 +132,23 @@ class LanDiscovery(
     val autoSearchEnabled: Boolean
         get() = autoSearchEnabledState
 
+    /**
+     * 配对页连续搜索模式。
+     *
+     * 「电脑配对」页打开期间置位：扫描循环跳过「0-5 / 5-9 / 9-15 / >15 分钟」的
+     * 分级降频与超时停止，始终以 [SCAN_INTERVAL_FAST_MS] 高频轮询 —— 该页面用户
+     * 正盯着列表找电脑，秒级响应优先于省电；页面关闭或用户点「停止搜索」时复位。
+     *
+     * 与 [autoSearchEnabled] 相互独立：即使总开关处于关闭状态（平时只做有限轮扫描），
+     * 配对页内的搜索也会一直进行，直到用户主动停止。
+     *
+     * 注意：若线程正睡在降频的长间隔里，仅置位本标志要等这一觉睡醒才生效，
+     * 调用方（SyncForegroundService）须通过「先 stop 再 start」重启扫描线程，
+     * 让首轮扫描立即执行。
+     */
+    @Volatile
+    var continuousSearchMode: Boolean = false
+
     /** 本轮自动搜索的时间窗起点，用于 0-5 / 5-9 / 9-15 / >15 分钟的分级降频 */
     @Volatile
     private var searchWindowStartMs: Long = 0L
@@ -369,8 +386,9 @@ class LanDiscovery(
                 fastSubnetScan()
                 round++
 
-                // 4. 自动搜索已关闭：仅完成手动扫描的有限轮数后停止
-                if (!autoSearchEnabled) {
+                // 4. 自动搜索已关闭：仅完成手动扫描的有限轮数后停止。
+                //    配对页连续搜索模式例外：该模式下搜索只由用户「停止搜索」结束
+                if (!autoSearchEnabled && !continuousSearchMode) {
                     if (manualRoundsLeft > 0) {
                         manualRoundsLeft--
                         try {
@@ -386,8 +404,10 @@ class LanDiscovery(
                 }
 
                 // 5. 分阶段降频：0-5 分钟高频 → 5-9 分钟每分钟一次 → 9-15 分钟每 2 分钟一次 → 超过 15 分钟停止
+                //    配对页连续搜索模式不走这张表：始终高频，不受 15 分钟上限约束
                 val elapsed = System.currentTimeMillis() - searchWindowStartMs
                 val interval = when {
+                    continuousSearchMode -> SCAN_INTERVAL_FAST_MS
                     elapsed < AUTO_SEARCH_SLOWDOWN_MS -> SCAN_INTERVAL_FAST_MS
                     elapsed < AUTO_SEARCH_SLOWDOWN2_MS -> SCAN_INTERVAL_SLOW_MS
                     elapsed < AUTO_SEARCH_STOP_MS -> SCAN_INTERVAL_SLOWER_MS

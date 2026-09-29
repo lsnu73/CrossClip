@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!-- 程序化开启 Wi-Fi（仅 Android 9 及以下；Android 10+ 走系统 Settings.Panel 由用户授权开启） -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 
     <!-- 前台服务与保活权限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

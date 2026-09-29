@@ -344,6 +344,7 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
               <span class="badge">离线</span>
               <button class="btn-ghost" style="pointer-events:none">重连</button>
             </div>
+            <div class="scanning" id="scanfoot" style="display:none;padding-top:12px"><i class="spin"></i>持续搜索中，发现新设备会自动加入</div>
           </div>
           <div class="sec-h">手动添加</div>
           <div class="field" id="ipfield" data-act="ipinput"><b>10.140.146.</b>___</div>
@@ -693,6 +694,8 @@ document.addEventListener('click', e=>{
     return;
   }
   if(a==='gopair'){ go('pairing'); startScan(); return; }
+  if(a==='stopscan'){ S.scanStopped=true; renderScan(); addLog('WARN','LAN discovery stopped by user','net'); return; }
+  if(a==='startscan'){ startScan(); return; }
 
   if(a==='connect'){
     const dev=t.dataset.dev, ip=t.dataset.ip;
@@ -851,14 +854,36 @@ function dl(){
   toast('已导出 crossclip-log.txt（'+LOGS.length+' 行）');
 }
 
-/* 配对屏扫描 */
-function startScan(){
+/* 配对屏扫描：进入页面一直搜索；超 10 秒引导「停止搜索」；停止后可「开始搜索」
+   （与 PairingActivity 交互契约一致，docs/ai-handover.md §3.17） */
+S.scanStopped=false; S.scanStartAt=Date.now();
+function renderScan(){
   const s = $('#scan');
-  if(S.scanDone){ s.innerHTML=''; $('#devlist').style.display=''; return; }
-  s.innerHTML = '<div class="scanning"><i class="spin"></i>正在搜索局域网内的设备…</div>';
+  if(S.scanDone && !S.scanStopped){
+    s.innerHTML='';
+    $('#devlist').style.display='';
+    const f=$('#scanfoot'); if(f) f.style.display='flex';
+    return;
+  }
   $('#devlist').style.display='none';
-  setTimeout(()=>{ S.scanDone=true; s.innerHTML=''; $('#devlist').style.display=''; addLog('INFO','LAN discovery finished · 2 peers found','net'); },1200);
+  const f=$('#scanfoot'); if(f) f.style.display='none';
+  if(S.scanStopped){
+    s.innerHTML='<div class="scanning" style="display:block;text-align:center">'
+      +'<span style="display:block;line-height:1.7">按下「开始搜索」按钮搜索局域网内的电脑<br>请确认电脑端 CrossClip 已启动，且手机与电脑在同一局域网</span>'
+      +'<div style="margin-top:12px"><button class="btn-ghost" data-act="startscan">开始搜索</button></div></div>';
+    return;
+  }
+  const over = Date.now()-S.scanStartAt > 10000;
+  s.innerHTML='<div class="scanning" style="display:block">'
+    +'<span style="display:flex;align-items:center;gap:10px"><i class="spin"></i>正在搜索局域网内的电脑…</span>'
+    +(over?'<div style="margin-top:8px;font-size:12.5px;color:var(--text-3)">超过 10 秒仍未发现电脑？可点击下方「停止搜索」按钮</div>':'')
+    +'<div style="margin-top:10px"><button class="btn-ghost" data-act="stopscan">停止搜索</button></div></div>';
 }
+function startScan(){
+  S.scanStopped=false; S.scanStartAt=Date.now(); renderScan();
+  setTimeout(()=>{ if(!S.scanStopped){ S.scanDone=true; renderScan(); addLog('INFO','LAN discovery finished · 2 peers found','net'); } },1200);
+}
+setInterval(()=>{ if(!S.scanDone && !S.scanStopped) renderScan(); },500);
 
 /* 心跳 */
 const HB = [

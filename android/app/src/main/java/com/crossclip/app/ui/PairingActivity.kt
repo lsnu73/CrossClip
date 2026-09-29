@@ -19,25 +19,46 @@ import com.crossclip.app.util.DebugLogger
 /**
  * 屏 2 · 电脑配对。
  *
- * 进入即显示扫描态；扫描出结果后切换为「已发现的设备」列表（在线直接连接，历史电脑以
- * 离线条目展示）；底部保留「手动添加 IP」入口。点击设备进入屏 3 输入 PIN 码。
+ * 页面打开期间**一直搜索**并显示转圈动画（服务的配对模式：连续搜索不走后台
+ * 5/9/15 分钟省电降频），发现设备只列入清单 —— 连接必须由用户点「连接」发起。
+ *
+ * 交互契约（用户要求，2026-09-29）：
+ * - 搜索超过 10 秒仍未发现电脑 → 文字引导用户点「停止搜索」；
+ * - 点「停止搜索」→ 按钮变「开始搜索」，上方显示排查指引（电脑端是否启动 / 是否同局域网）；
+ * - 再点「开始搜索」→ 恢复连续搜索态；
+ * - 离开页面：交还后台省电策略（用户停过则保持「搜索已暂停」，不悄悄恢复）。
+ *
+ * 底部保留「手动添加 IP」入口；点击设备进入屏 3 输入 PIN 码。
  */
 class PairingActivity : AppCompatActivity() {
 
+    companion object {
+        /** 搜索超过该时长仍未发现电脑时，显示「停止搜索」引导文案 */
+        private const val SCAN_OVERTIME_HINT_MS = 10_000L
+    }
+
     private lateinit var scanContainer: View
+    private lateinit var tvScanOvertimeHint: TextView
+    private lateinit var btnStopSearch: Button
     private lateinit var emptyState: View
     private lateinit var tvEmptyHint: TextView
-    private lateinit var btnRescanEmpty: Button
+    private lateinit var btnStartSearch: Button
     private lateinit var deviceSection: View
+    private lateinit var searchingFooter: View
     private lateinit var deviceList: LinearLayout
     private lateinit var etManualIp: EditText
 
     private val handler = Handler(Looper.getMainLooper())
     private var isDestroyedActivity = false
 
+    /** 本轮搜索开始时刻：超过 10 秒未发现时显示引导文案 */
+    private var searchStartAtMs = 0L
+
+    /** 用户是否刚点过「停止搜索」：离开页面时告知服务保持停止态，不悄悄恢复后台搜索 */
+    private var stoppedByUser = false
+
     /** 上次渲染的设备指纹，避免每 500ms 重建列表导致点击态闪烁 */
     private var lastRenderKey = ""
-    private var scanSpinnerMinShownUntil = 0L
 
     private val pollRunnable = object : Runnable {
         override fun run() {
@@ -52,15 +73,24 @@ class PairingActivity : AppCompatActivity() {
         setContentView(R.layout.activity_pairing)
 
         scanContainer = findViewById(R.id.scan_container)
+        tvScanOvertimeHint = findViewById(R.id.tv_scan_overtime_hint)
+        btnStopSearch = findViewById(R.id.btn_stop_search)
         emptyState = findViewById(R.id.empty_state)
         tvEmptyHint = findViewById(R.id.tv_empty_hint)
-        btnRescanEmpty = findViewById(R.id.btn_rescan_empty)
+        btnStartSearch = findViewById(R.id.btn_start_search)
         deviceSection = findViewById(R.id.device_section)
+        searchingFooter = findViewById(R.id.searching_footer)
         deviceList = findViewById(R.id.device_list)
         etManualIp = findViewById(R.id.et_manual_ip)
 
         findViewById<View>(R.id.btn_back).setOnClickListener { finish() }
-        btnRescanEmpty.setOnClickListener { rescan() }
+
+        btnStopSearch.setOnClickListener {
+            stoppedByUser = true
+            SyncForegroundService.instance?.stopPairingSearch()
+            renderScanState()
+        }
+        btnStartSearch.setOnClickListener { startSearch() }
 
         findViewById<Button>(R.id.btn_add_ip).setOnClickListener {
             val ip = etManualIp.text.toString().trim()
@@ -71,19 +101,20 @@ class PairingActivity : AppCompatActivity() {
             // 手动地址直接进 PIN 码屏；目标名以 IP 兜底展示
             openPinScreen(name = ip, ip = ip)
         }
-
-        // 扫描 spinner 至少展示 1.2 秒，避免一进页面就闪空列表
-        scanSpinnerMinShownUntil = System.currentTimeMillis() + 1200
     }
 
     override fun onResume() {
         super.onResume()
+        startSearch()
         handler.post(pollRunnable)
     }
 
     override fun onPause() {
         super.onPause()
         handler.removeCallbacks(pollRunnable)
+        // 离开页面（含点「连接」进入 PIN 屏）：退出配对模式。
+        // 用户点过「停止搜索」则保持停止态；否则交还后台按省电窗口继续找。
+        SyncForegroundService.instance?.endPairingSearch(userStopped = stoppedByUser)
     }
 
     override fun onDestroy() {
@@ -92,12 +123,29 @@ class PairingActivity : AppCompatActivity() {
         handler.removeCallbacksAndMessages(null)
     }
 
+    // ==================== 搜索控制 ====================
+
+    /** 进入 / 恢复连续搜索：置位服务配对模式（发现不自动连）并重启扫描线程 */
+    private fun startSearch() {
+        stoppedByUser = false
+        searchStartAtMs = System.currentTimeMillis()
+        lastRenderKey = ""
+        val service = SyncForegroundService.instance
+        if (service == null) {
+            // 服务尚未就绪：先渲染搜索态，服务起来后下一帧轮询自动接上
+            renderScanState()
+            return
+        }
+        service.beginPairingSearch()
+    }
+
     // ==================== 扫描态与设备列表 ====================
 
     private fun renderScanState() {
         val service = SyncForegroundService.instance
         if (service == null) {
             showOnly(scanContainer)
+            tvScanOvertimeHint.visibility = View.GONE
             return
         }
         val devices = service.getDiscoveredDeviceList().toMutableList()
@@ -113,24 +161,30 @@ class PairingActivity : AppCompatActivity() {
             ))
         }
 
-        val spinnerVisible = service.isLanSearching() && devices.isEmpty() ||
-            System.currentTimeMillis() < scanSpinnerMinShownUntil
-
-        if (spinnerVisible) {
-            showOnly(scanContainer)
-            return
-        }
+        val searching = service.isLanSearching()
 
         if (devices.isEmpty()) {
-            showOnly(emptyState)
-            tvEmptyHint.text = when {
-                !service.isAutoSearchEnabled() -> "自动搜索已关闭，请手动添加 IP 或点击重新扫描"
-                else -> "未发现在线电脑\n请确认电脑端 CrossClip 已运行且两端在同一网络"
+            if (searching) {
+                showOnly(scanContainer)
+                // 超过 10 秒仍未发现：文字引导用户点「停止搜索」
+                val overtime = System.currentTimeMillis() - searchStartAtMs > SCAN_OVERTIME_HINT_MS
+                tvScanOvertimeHint.visibility = if (overtime) View.VISIBLE else View.GONE
+            } else {
+                showOnly(emptyState)
+                // 已停止搜索：告知按下按钮开始搜索 + 排查指引
+                tvEmptyHint.text = when {
+                    !service.isAutoSearchEnabled() ->
+                        "自动搜索已关闭，也可通过下方「手动添加」输入电脑 IP\n按下「开始搜索」按钮搜索局域网内的电脑\n请确认电脑端 CrossClip 已启动，且手机与电脑在同一局域网"
+                    else ->
+                        "按下「开始搜索」按钮搜索局域网内的电脑\n请确认电脑端 CrossClip 已启动，且手机与电脑在同一局域网"
+                }
             }
             return
         }
 
         showOnly(deviceSection)
+        // 列表非空时搜索是否仍在进行：底部一行小字提示（发现新设备会自动加入）
+        searchingFooter.visibility = if (searching) View.VISIBLE else View.GONE
         renderDeviceList(service, devices, connected)
     }
 
@@ -231,18 +285,6 @@ class PairingActivity : AppCompatActivity() {
         deviceList.addView(div)
     }
 
-    private fun rescan() {
-        val service = SyncForegroundService.instance
-        if (service == null) {
-            Toast.makeText(this, "后台服务未就绪，请稍候...", Toast.LENGTH_SHORT).show()
-            return
-        }
-        scanSpinnerMinShownUntil = System.currentTimeMillis() + 1200
-        lastRenderKey = ""
-        service.triggerRescan()
-        Toast.makeText(this, "正在重新搜索局域网电脑...", Toast.LENGTH_SHORT).show()
-    }
-
     private fun openPinScreen(name: String, ip: String) {
         val service = SyncForegroundService.instance
         if (service == null) {
@@ -253,7 +295,7 @@ class PairingActivity : AppCompatActivity() {
         val sp = getSharedPreferences("cross_clip_config", MODE_PRIVATE)
         val deviceId = service.currentTargetDeviceId
         val savedPin = sp.getString("pin_code_$deviceId", "") ?: sp.getString("pin_code", "") ?: ""
-        DebugLogger.log("UI", "进入 PIN 码配对屏: $name ($ip) savedPin.len=${savedPin.length}")
+        DebugLogger.log("UI", "用户点击「连接」，进入 PIN 码配对屏: $name ($ip) savedPin.len=${savedPin.length}")
         startActivity(
             Intent(this, PairCodeActivity::class.java)
                 .putExtra(PairCodeActivity.EXTRA_DEVICE_NAME, name)
