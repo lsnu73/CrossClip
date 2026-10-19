@@ -29,3 +29,20 @@
   - 违反代价：占位身份（`android_phone`/「安卓手机」）冲掉真实身份，托盘在每次剪贴板
     同步 / SSE 建连后退化显示，最长 30 秒才恢复。
   - 强制点：`rust_desktop/src/server.rs` 的 `touch_peer_or_register_placeholder()`。
+
+- **INV-005** 任何「执行动作的判定」（按钮是否可用、是否弹确认、阈值比较）必须使用
+  原始数据值，**禁止解析 UI 展示文案反推**；展示层的格式化（取整、单位换算、截断）
+  一律视为有损。
+  - 违反代价：格式化吞掉真值后判定跟着失真——缓存残留 < 1 MB 被「0 MB」显示
+    连带判成「清洁」，清理按钮永久失效（pitfalls/2026-10-19-cache-button-dead-by-display-rounding.md）。
+  - 强制点：`MainActivity.lastCacheBytes` 字段范式。
+    ⚠️ 通用约定无编译期强制，靠 code review 兜底。
+
+- **INV-006** 任何「把 App 拉活」的入口（服务启动、广播唤醒、守护拉起、未来的
+  JobScheduler/推送等）必须尊重 `user_exited` 退出态：先查标志，置位则放弃启动。
+  彻底退出的四步顺序（写标志 → pkill 守护 → stopService → 延迟杀进程）不可调换。
+  - 违反代价：新增保活机制绕过退出态，「退出软件」被某条路径复活，功能名存实亡；
+    顺序调换则 STICKY/守护在杀进程瞬间把服务拉回。
+  - 强制点：`SyncForegroundService.onStartCommand` 入口的 user_exited 闸门（唯一
+    服务入口）；`MainActivity.exitAppCompletely()` 的四步顺序。
+    ⚠️ 新增的拉活入口不在编译期覆盖范围内，靠本条约与 code review 兜底。

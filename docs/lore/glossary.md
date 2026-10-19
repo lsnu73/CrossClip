@@ -23,3 +23,10 @@
   （§7 #24）、省电门控误杀手动首连（§7 #28）。
 - `同步记录 / 回声窗口 / lamport_clock`：剪贴板去重三件套（电脑端为 hub 统一分配时钟），
   见 ai-handover.md §3.4 与 docs/protocol.md「剪贴板同步算法」。
+- `退出态（user_exited）`：`cross_clip_config` SharedPreferences 的持久布尔标志，
+  「退出软件」置位、`MainActivity.onCreate`（手动打开）清除。所有把 App 拉活的入口
+  须先查它（INV-006）；服务入口闸门在 `SyncForegroundService.onStartCommand`。
+- `Shizuku 守护循环`：`ShizukuPrivilegeHelper.startBackgroundWakeupPulse()` 拉起的
+  `nohup` Shell 循环（UID 2000），每 10 秒 `pidof` 探测并 `am start-foreground-service`
+  复活进程；是「退出软件」必须 pkill 的最硬复活路径
+  （decisions/2026-10-19-exit-app-must-defeat-three-revival-paths.md）。

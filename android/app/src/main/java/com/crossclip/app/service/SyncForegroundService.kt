@@ -1799,6 +1799,13 @@ class SyncForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action ?: "NORMAL_START"
+        // 「退出软件」退出态：任何路径（STICKY 复活 / 闹钟 / Shizuku 守护在途 am start）
+        // 把服务拉活都立刻自我终结。只能由 MainActivity 手动打开解除该标志。
+        if (getSharedPreferences("cross_clip_config", MODE_PRIVATE).getBoolean("user_exited", false)) {
+            DebugLogger.log("SVC_LIFECYCLE", "用户已退出软件，服务自我终结 (action=$action)")
+            stopSelf()
+            return START_NOT_STICKY
+        }
         DebugLogger.log("SVC_LIFECYCLE", "SyncForegroundService.onStartCommand: action=$action, flags=$flags, startId=$startId")
         loadPreferences()
         if (intent?.action == ACTION_MANUAL_SEND) {

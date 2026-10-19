@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>CrossClip 设置 · 可交互原型 v1</title>
+<title>CrossClip 设置 · 可交互原型 v2</title>
 <style>
 :root{
   --bg:#F2F2F4; --surface:#FFFFFF;
@@ -110,9 +110,49 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
 .btn-row{display:flex;gap:10px;padding:6px 20px 14px}
 .btn-row .btn-ghost{flex:1;height:36px}
 .btn-block{width:calc(100% - 40px);margin:16px 20px 0;height:44px;font-size:15px}
-.danger-row{display:flex;align-items:center;justify-content:space-between;padding:8px 20px 4px}
+
+/* ---------- 退出软件（破坏性操作，独立成块） ---------- */
+.exit-block{padding:36px 20px 0}
+.btn-exit{display:block;width:100%;height:50px;border-radius:var(--r-ctl);
+  background:#fff;border:1px solid rgba(194,69,58,.24);color:var(--danger);
+  font-size:15px;font-weight:500;font-family:var(--sans);letter-spacing:.01em;
+  cursor:pointer;transition:background .16s ease,border-color .16s ease}
+.btn-exit:active{background:rgba(194,69,58,.06);border-color:rgba(194,69,58,.44)}
+.exit-note{margin-top:10px;text-align:center;font-size:11.5px;line-height:1.65;
+  color:var(--text-3);letter-spacing:.01em}
+
+/* ---------- 次级破坏性操作（仅日志页使用） ---------- */
+.danger-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 20px 16px;
+  cursor: pointer;
+}
+.danger-row button {
+  color: var(--danger);
+  font-size: 16px;
+  font-weight: 500;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--sans);
+  padding: 6px 0;
+  margin: 0;
+}
 .danger-row span{font-size:14px;color:var(--danger);background:none;border:0;cursor:pointer;font-family:var(--sans);padding:6px 0}
-.danger-row em{font-style:normal;font-size:12px;color:var(--text-3)}
+.danger-row em {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+.exited{position:absolute;inset:0;z-index:80;background:#101318;display:none;flex-direction:column;align-items:center;justify-content:center;gap:10px;cursor:pointer;text-align:center;padding:0 40px}
+.exited.on{display:flex}
+.exited b{color:#E8EAEE;font-size:16.5px;font-weight:600}
+.exited span{color:#69707C;font-size:12.5px;line-height:1.7}
 
 /* ---------- 页脚 ---------- */
 .foot{text-align:center;font-family:var(--mono);font-size:11px;color:#B7BCC4;padding:18px 0 8px;letter-spacing:.03em}
@@ -234,9 +274,6 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
 .boxes.bad div.filled{border-color:var(--danger);color:var(--danger)}
 .hint{text-align:center;font-size:12.5px;color:var(--text-3);margin-top:14px;line-height:1.6}
 
-/* ---------- 长按菜单 ---------- */
-.sheet .grab{}
-
 /* ---------- 右侧说明 ---------- */
 .side{width:376px;flex:0 0 auto}
 .side h1{font-size:19px;font-weight:600;letter-spacing:-.01em}
@@ -314,6 +351,12 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
           <div class="div"></div>
           <div class="row" data-act="sys" role="button" tabindex="0"><div class="t"><b>自启动与后台复活<i class="why" data-why="boot"></i></b></div><span class="go">去设置</span><i class="chev"></i></div>
           <div class="explain" data-ex="boot">允许应用在开机或被清理后自动恢复同步。<u>希望长期免维护运行建议开启</u>。</div>
+
+          <!-- 退出软件：独立成块，破坏性操作用描边按钮承载 -->
+          <div class="exit-block">
+            <button class="btn-exit" data-act="exit">退出软件</button>
+            <p class="exit-note">彻底结束进程 · 同步与后台守护全部停止，下次使用需手动打开</p>
+          </div>
 
           <div class="diag-entry"><button class="diag-link" data-act="viewlog">查看诊断日志与排查工具</button></div>
           <div class="foot">CrossClip v2.1.2 · build 20260912</div>
@@ -424,6 +467,13 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
         </div>
       </div>
       <div class="toast" id="toast"></div>
+
+      <!-- ---------- 已退出遮罩（退出软件预览） ---------- -->
+      <div class="exited" id="exited">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none"><path d="M12 3v8" stroke="#8A93A0" stroke-width="1.8" stroke-linecap="round"/><path d="M6.3 6.5a8 8 0 1 0 11.4 0" stroke="#8A93A0" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <b>CrossClip 已退出</b>
+        <span>后台服务与进程已彻底结束（设计预览）<br>点击此处恢复预览</span>
+      </div>
     </div>
   </div>
 
@@ -446,6 +496,7 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
         <li><b>权限文案</b><span>省电策略与自启动统一为「去设置 ›」</span></li>
         <li><b>路径可点</b><span>保存目录与日志路径为蓝色；<em>长按</em>保存目录可选用其他应用打开</span></li>
         <li><b>ⓘ 功能说明</b><span>每项设置标题后的 ⓘ 可展开「要不要开」的建议，不占额外行高</span></li>
+        <li><b>退出软件</b><span>独立成块：整宽描边红字按钮 + 下方一行后果说明，与设置行区隔开</span></li>
       </ul>
       <button class="reset" data-act="reset">重置演示状态</button>
     </div>
@@ -453,6 +504,7 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
     <div class="card">
       <h5>操作提示</h5>
       <ul>
+        <li><b>退出软件</b><span>设置页底部红色描边按钮，二次确认后进入「已退出」遮罩，点击遮罩恢复预览</span></li>
         <li><b>配对码</b><span>正确 694780；任意其他 6 位数字可触发错误清空</span></li>
         <li><b>键盘</b><span>配对码屏直接敲数字，Backspace 回删，Enter 确认</span></li>
         <li><b>长按</b><span>在「接收文件保存目录」路径上按住 0.5 秒</span></li>
@@ -611,7 +663,6 @@ function renderState(){
   $('#statebox').innerHTML =
     '<span class="k">connected</span>  '+S.connected+'   <span class="k">peer</span> '+(S.connected?S.dev+'@'+S.ip:'—')+'\n'+
     '<span class="k">switches</span>   auto:'+S.sw.auto+'  search:'+S.sw.search+'  hide:'+S.sw.hide+'\n'+
-
     '<span class="k">directory</span>  '+S.dir+'\n'+
     '<span class="k">cache</span>      '+S.cache+' MB\n'+
     '<span class="k">logs</span>       '+LOGS.length+' 行 · filter='+S.filter+'\n'+
@@ -758,6 +809,13 @@ document.addEventListener('click', e=>{
   }
 
   if(a==='viewlog'){ go('logs'); return; }
+  if(a==='exit'){
+    confirmBox('退出 CrossClip？','将停止剪贴板同步、文件传输与后台守护，并彻底结束进程（等同 Windows 的「结束任务」）。已保存的文件与配对信息保留，下次使用需手动打开应用。','退出',()=>{
+      addLog('WARN','User exit · background service stopped, process killed','app');
+      $('#exited').classList.add('on');
+    });
+    return;
+  }
   if(a==='copypath'){ copy('/sdcard/Android/data/com.crossclip/files/logs'); return; }
   if(a==='export'){ dl(); return; }
   if(a==='copylog'){ copy(LOGS.map(l=>l.ts+' '+l.lvl+' '+l.msg).join('\n')); return; }
@@ -781,11 +839,14 @@ document.addEventListener('click', e=>{
   }
 });
 
+/* 退出预览遮罩：点击恢复 */
+$('#exited').addEventListener('click', ()=> $('#exited').classList.remove('on'));
+
 /* sheet 选项 */
 $('#sheet').addEventListener('click', e=>{
   const o = e.target.closest('.opt'); if(!o) return;
   const v = o.dataset.opt, mode = $('#sheet').dataset.mode;
-if(mode==='dir'){ S.dir=v; renderHero(); addLog('INFO','Setting changed · save dir = '+v,'sync'); toast('保存目录已更新'); }
+  if(mode==='dir'){ S.dir=v; renderHero(); addLog('INFO','Setting changed · save dir = '+v,'sync'); toast('保存目录已更新'); }
   else if(mode==='openwith'){
     if(v==='copy'){ copy(S.dir); }
     else { toast('正在用「'+o.querySelector('s').textContent+'」打开目录'); }

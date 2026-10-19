@@ -149,6 +149,24 @@ object ShizukuPrivilegeHelper {
         }
     }
 
+    /**
+     * 停止 Shell 常驻守护循环（用户「退出软件」时调用）。
+     * 守护循环每 10 秒探测进程并拉起前台服务，不杀它「彻底退出」会在 10 秒内复活。
+     * 若此刻 Shizuku 不可用导致 pkill 失败，退出态标志（user_exited）兜底：
+     * 服务被拉起后自查标志并自我终结。
+     */
+    fun stopBackgroundWakeupPulse() {
+        pulseStarted.set(false)
+        executor.execute {
+            try {
+                runShellCommandWithDetails("pkill -f 'com.crossclip.app.WAKEUP'")
+                DebugLogger.log("SHIZUKU_DAEMON", "已停止 Shell 常驻唤醒守护（退出软件）")
+            } catch (e: Exception) {
+                DebugLogger.log("SHIZUKU_DAEMON", "停止 Shell 常驻唤醒守护异常: ${e.message}")
+            }
+        }
+    }
+
     private data class CommandResult(val exitCode: Int, val stdout: String, val stderr: String)
 
     private fun runShellCommandWithDetails(command: String): CommandResult {

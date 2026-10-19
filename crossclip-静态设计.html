@@ -106,6 +106,17 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
   height:34px;padding:0 14px;font-size:13px;font-family:var(--sans)}
 .btn-row{display:flex;gap:10px;padding:6px 20px 14px}
 .btn-row .btn-ghost{flex:1;height:36px}
+/* ---------- 退出软件（破坏性操作，独立成块） ---------- */
+.exit-block{padding:36px 20px 0}
+.btn-exit{display:block;width:100%;height:50px;border-radius:var(--r-ctl);
+  background:#fff;border:1px solid rgba(194,69,58,.24);color:var(--danger);
+  font-size:15px;font-weight:500;font-family:var(--sans);letter-spacing:.01em;
+  cursor:pointer;transition:background .16s ease,border-color .16s ease}
+.btn-exit:active{background:rgba(194,69,58,.06);border-color:rgba(194,69,58,.44)}
+.exit-note{margin-top:10px;text-align:center;font-size:11.5px;line-height:1.65;
+  color:var(--text-3);letter-spacing:.01em}
+
+/* ---------- 次级破坏性操作（仅日志页使用） ---------- */
 .danger-row{display:flex;align-items:center;justify-content:space-between;padding:8px 20px 4px}
 .danger-row span{font-size:14px;color:var(--danger)}
 .danger-row em{font-style:normal;font-size:12px;color:var(--text-3)}
@@ -256,12 +267,16 @@ body{background:#E9E9EC;color:var(--text);font-family:var(--sans);-webkit-font-s
           <div class="div"></div>
           <div class="row"><div class="t"><b>自启动与后台复活<i class="why"></i></b></div><span class="go">去设置</span><i class="chev"></i></div>
 
+          <div class="exit-block">
+            <div class="btn-exit" style="display:flex;align-items:center;justify-content:center">退出软件</div>
+            <p class="exit-note" style="margin:10px 0 0">彻底结束进程 · 同步与后台守护全部停止，下次使用需手动打开</p>
+          </div>
           <div class="diag-entry"><span class="diag-link">查看诊断日志与排查工具</span></div>
           <div class="foot">CrossClip v2.1.2 · build 20260912</div>
         </div>
       </div>
       <div class="caption"><b>01 / 设置</b><span>hub</span>
-        <i>同步组内只保留两个与同步直接相关的开关；加锁与两项系统权限统一为「去设置 ›」；诊断收进底部下划线入口。标题后的 ⓘ 为折叠说明，默认不占行高。</i></div>
+        <i>同步组内只保留两个与同步直接相关的开关；加锁与两项系统权限统一为「去设置 ›」；诊断收进底部下划线入口。标题后的 ⓘ 为折叠说明，默认不占行高。「退出软件」独立成块：36px 上留白与设置项隔开，整宽白底红描边按钮（50px，非填充红——破坏性但克制），按钮下方独立一行灰色后果说明「彻底结束进程 · 同步与后台守护全部停止，下次使用需手动打开」；二次确认后彻底结束进程。与日志页「清空日志」的文字链形态形成危险等级差。</i></div>
     </div>
 
     <!-- ================= 屏 2：电脑配对 ================= -->

@@ -32,3 +32,6 @@ Thumbs.db
 .idea/
 .reasonix/
 .xcodemap/
+
+# repowise owner-digest key (local)
+.repowise/events.key

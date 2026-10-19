@@ -14,6 +14,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.os.Process
 import android.provider.Settings
 import android.view.View
 import android.widget.TextView
@@ -25,6 +26,7 @@ import com.crossclip.app.R
 import com.crossclip.app.BuildConfig
 import com.crossclip.app.service.SyncForegroundService
 import com.crossclip.app.shizuku.ShizukuClipboardManager
+import com.crossclip.app.shizuku.ShizukuPrivilegeHelper
 import com.crossclip.app.util.DebugLogger
 import com.crossclip.app.util.PermissionHelper
 import com.crossclip.app.util.SaveDirManager
@@ -141,6 +143,11 @@ class MainActivity : AppCompatActivity() {
         ShizukuClipboardManager.init(applicationContext)
         DebugLogger.init(applicationContext)
         DebugLogger.log("APP_LIFECYCLE", "MainActivity.onCreate 版本: v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+
+        // 手动打开 App 即解除「退出软件」的退出态（服务 onStartCommand 自查该标志并自我终结，
+        // 唯一能清除它的地方就是这里——用户主动点图标进来）
+        getSharedPreferences("cross_clip_config", MODE_PRIVATE)
+            .edit().putBoolean("user_exited", false).apply()
         initViews()
         loadConfig()
         applyHideFromRecentsPreference()
@@ -219,6 +226,9 @@ class MainActivity : AppCompatActivity() {
         explainMap.forEach { (infoId, exId) ->
             findViewById<View>(infoId).setOnClickListener { toggleExplain(infoId, exId) }
         }
+
+        // 退出软件：确认弹窗 → 彻底结束进程
+        findViewById<View>(R.id.btn_exit_app).setOnClickListener { confirmExitApp() }
 
         // ---------- 连接总览 ----------
         btnDisconnect.setOnClickListener {
@@ -496,16 +506,27 @@ class MainActivity : AppCompatActivity() {
 
     // ==================== 本地缓存 ====================
 
+    /** 最近一次实测的 cacheDir 字节数（清理按钮的判定依据，禁止解析展示文案） */
+    @Volatile
+    private var lastCacheBytes: Long = 0L
+
     /** cacheDir 体积（文件传输中转分块与分享中转都在 cacheDir 下） */
     private fun refreshCacheSize() {
         Thread {
             val bytes = dirSize(cacheDir)
+            lastCacheBytes = bytes
             runOnUiThread {
                 if (!isDestroyedActivity) {
-                    tvCacheSize.text = if (bytes < 1024) "0 MB" else "${bytes / (1024 * 1024)} MB"
+                    tvCacheSize.text = formatCacheSize(bytes)
                 }
             }
         }.start()
+    }
+
+    private fun formatCacheSize(bytes: Long): String = when {
+        bytes < 1024 -> "0 KB"
+        bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+        else -> String.format(Locale.getDefault(), "%.1f MB", bytes / (1024.0 * 1024.0))
     }
 
     private fun dirSize(dir: File?): Long {
@@ -518,7 +539,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun confirmClearCache() {
-        val bytes = tvCacheSize.text.toString().removeSuffix(" MB").toLongOrNull() ?: 0L
+        // 判定用实测字节数而非展示文案：此前解析 "0 MB" 文本（MB 取整后不足 1 MB
+        // 一律显示 0），任何 sub-MB 残留都被误判为「清洁」，清理按钮永远不可用
+        val bytes = lastCacheBytes
         if (bytes <= 0) {
             Toast.makeText(this, "缓存已是清洁状态", Toast.LENGTH_SHORT).show()
             return
@@ -544,6 +567,41 @@ class MainActivity : AppCompatActivity() {
         val shown = if (mb >= 1) String.format(Locale.getDefault(), "%.1f MB", mb) else "${bytes / 1024} KB"
         setMessage("将删除 $shown 临时文件（含传输中断的残留分块与分享中转副本），不会删除已保存的接收文件。")
         return this
+    }
+
+    // ==================== 退出软件 ====================
+
+    private fun confirmExitApp() {
+        AlertDialog.Builder(this)
+            .setTitle("退出 CrossClip？")
+            .setMessage("将停止剪贴板同步、文件传输与后台守护，并彻底结束进程（等同 Windows 的「结束任务」）。已保存的文件与配对信息保留，下次使用需手动打开应用。")
+            .setPositiveButton("退出") { _, _ -> exitAppCompletely() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
+     * 彻底退出（等同结束进程）。复活路径有三条，必须逐一封堵：
+     * 1. Shizuku Shell 守护循环（UID 2000，每 10 秒探测进程并拉起前台服务）→ pkill；
+     * 2. START_STICKY：服务仍标记为运行时进程被杀会被系统拉起 → 先显式 stopService；
+     *    （onTaskRemoved 的闹钟拉起只在服务存活时回调，服务已停则不会触发）
+     * 3. 残余竞态（守护循环在 pkill 前最后一拍已发出的 am start 等）→ 持久化
+     *    user_exited 标志，服务 onStartCommand 自查到标志即自我终结；
+     *    标志只在本 Activity 的 onCreate（手动打开）时清除。
+     */
+    private fun exitAppCompletely() {
+        DebugLogger.warn("UI", "用户确认退出软件：停止守护与服务，彻底结束进程")
+        getSharedPreferences("cross_clip_config", MODE_PRIVATE)
+            .edit().putBoolean("user_exited", true).apply()
+        ShizukuPrivilegeHelper.stopBackgroundWakeupPulse()
+        stopService(Intent(this, SyncForegroundService::class.java))
+        // stopService 经主线程消息队列异步生效，等服务的销毁回调跑完再杀进程，
+        // 否则 AMS 记录里服务仍是 running，进程一死 STICKY 会立刻复活它
+        handler.postDelayed({
+            DebugLogger.log("UI", "退出软件：结束进程")
+            finishAndRemoveTask()
+            Process.killProcess(Process.myPid())
+        }, 800)
     }
 
     private fun clearCacheDir(dir: File) {
