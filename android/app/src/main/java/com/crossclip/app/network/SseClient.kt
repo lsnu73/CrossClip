@@ -57,7 +57,13 @@ class SseClient(
     private fun isActive(gen: Int): Boolean = !isClosed && generation.get() == gen
 
     fun connect(url: String) {
-        disconnect()
+        // 换代必须静默：公开 disconnect() 会同步回调 onConnectionChanged(false)，
+        // 服务层据此把「已连接」打回未连接并触发掉线处理 —— 而 connect() 的调用方
+        // （配对成功/自动握手成功）此刻往往刚把状态置为已连接，一次假掉线回调会
+        // 立刻把它冲掉，随后的省电门控看到「未连接」便拒绝发起首次连接（2.6.0 实测：
+        // 自动搜索关闭时手动配对成功却始终显示未连接）。
+        // 「被新连接顶替」不等于「掉线」，旧代线程自己会经 isActive 检查静默退出。
+        teardown(notify = false)
         isClosed = false
         activeUrl = url
         val myGen = generation.incrementAndGet()
@@ -71,16 +77,22 @@ class SseClient(
                 .header("Cache-Control", "no-cache")
                 .build()
 
+            // 首轮尝试豁免门控：connect() 的每个调用方（PIN 配对成功、自动握手成功、
+            // IP 漂移热重连）都代表一次**明确的立即连接意图**，第一次尝试必须发出；
+            // 省电门控管的只是「失败之后的自动重试」。否则自动搜索关闭时，手动配对
+            // 成功后的首次连接也会被闸死在起跑线上（2.6.0 实测假死）。
+            var isFirstAttempt = true
             while (isActive(myGen)) {
                 // 重连调度：每一轮开头取一次当前窗口阶段对应的间隔。搜索窗口已关闭
                 // （15 分钟超时 / 自动搜索关停）且未连接时返回 null，退出重连循环。
                 // 恢复路径由上层负责——用户「重新扫描」或重新握手成功后会再次调用
                 // connect() 拉起新一代连接线程。
                 val retryDelayMs = nextRetryDelayMs?.invoke()
-                if (nextRetryDelayMs != null && retryDelayMs == null) {
+                if (!isFirstAttempt && nextRetryDelayMs != null && retryDelayMs == null) {
                     DebugLogger.log("SSE", "搜索窗口已关闭且未连接，停止 SSE 自动重连（等待用户手动触发）")
                     break
                 }
+                isFirstAttempt = false
                 var call: Call? = null
                 try {
                     call = client.newCall(request)
@@ -180,6 +192,17 @@ class SseClient(
     }
 
     fun disconnect() {
+        teardown(notify = true)
+    }
+
+    /**
+     * 停掉当前代连接。
+     *
+     * @param notify 是否向服务层回调 onConnectionChanged(false)。显式断开/重扫/
+     *   清空历史等「这条连接真的没了」的路径传 true；connect() 换代时传 false ——
+     *   旧连接被顶替不是掉线，假回调会把刚置位的已连接状态冲掉。
+     */
+    private fun teardown(notify: Boolean) {
         isClosed = true
         // 先作废旧一代，再 cancel：cancel 会关闭底层 socket，阻塞中的读操作立刻抛异常退出，
         // 这是唯一能真正杀死读线程的手段（interrupt 无法唤醒阻塞的 socket read）
@@ -188,7 +211,9 @@ class SseClient(
         currentCall = null
         thread?.interrupt()
         thread = null
-        onConnectionChanged(false)
+        if (notify) {
+            onConnectionChanged(false)
+        }
         DebugLogger.log("SSE", "主动断开 SSE 长连接")
     }
 }

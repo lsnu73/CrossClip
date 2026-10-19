@@ -233,6 +233,27 @@ impl Broadcaster {
         }
     }
 
+    /// 「连接即在线」类端点（/events、/sync）的对等节点登记：
+    /// 已注册的对端只刷新存活时间，未注册的才以占位身份「安卓手机」登记 ——
+    /// 绝不能用占位身份覆盖 /auth、/heartbeat 上报的真实身份，
+    /// 否则托盘在每次剪贴板同步 / SSE 建连后都退化为「安卓手机」，
+    /// 要等下一次心跳（最长 30 秒）才恢复。
+    pub fn touch_peer_or_register_placeholder(&self, ip: String, port: u16) {
+        let known = self.peers.read().unwrap().iter().any(|p| p.ip == ip);
+        if known {
+            // 空身份字段不会覆盖已有记录，只刷新 last_seen / port
+            self.register_peer(ip, port, String::new(), String::new(), String::new());
+        } else {
+            self.register_peer(
+                ip,
+                port,
+                "android_phone".to_string(),
+                "安卓手机".to_string(),
+                String::new(),
+            );
+        }
+    }
+
     pub fn broadcast_text(&self, text: &str, clock: u64) {
         if text.trim().is_empty() {
             return;
@@ -754,13 +775,11 @@ fn handle_client_request(
         }
 
         // clone 而非 move：这个连接结束时还要用同一个 IP 把自己从 peers 里摘掉
-        // 此时手机端身份尚未上报，先占位注册，真实名称/品牌由 /auth 与 /heartbeat 刷新
-        log_ok!(
-            "SSE",
-            "手机端 SSE 长连接建立: {} (先占位注册, 真实身份待 /auth 或 /heartbeat 刷新)",
-            client_ip
-        );
-        broadcaster.register_peer(client_ip.clone(), 18237, "android_phone".to_string(), "安卓手机".to_string(), String::new());
+        // 未注册过的手机先占位登记，真实名称/品牌由 /auth 与 /heartbeat 刷新；
+        // 已注册过的（如配对流程里 /auth 先于 /events 到达）只刷新存活时间，
+        // 不能用占位身份把真实身份冲掉
+        log_ok!("SSE", "手机端 SSE 长连接建立: {}", client_ip);
+        broadcaster.touch_peer_or_register_placeholder(client_ip.clone(), 18237);
 
         let (tx, rx) = channel::<String>();
         {
@@ -923,7 +942,9 @@ fn handle_client_request(
                         None => true,
                     };
                     if hash_ok && !decrypted.trim().is_empty() {
-                        broadcaster.register_peer(client_ip, 18237, "android_phone".to_string(), "安卓手机".to_string(), String::new());
+                        // 只证明对端在线：已注册节点仅刷新存活时间，
+                        // 未注册才占位登记 —— 不得用占位身份覆盖真实身份
+                        broadcaster.touch_peer_or_register_placeholder(client_ip, 18237);
 
                         // hub 统一分配单调时钟：到达序即用户意图序；登记先行于写入，
                         // 随后的本地剪贴板变化事件命中记录被跳过（防回环）

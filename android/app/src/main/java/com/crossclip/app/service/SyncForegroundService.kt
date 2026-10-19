@@ -705,7 +705,9 @@ class SyncForegroundService : Service() {
             // 自动重连调度与 LanDiscovery 的省电窗口同一张时间表：
             // 已连接时 2 秒快速重连（秒级恢复抖动）；未连接时跟随搜索窗口分级降频
             // （0-5 分钟 2 秒 / 5-9 分钟 1 分钟 / 9-15 分钟 2 分钟），
-            // 窗口停止后返回 null，重连循环退出，不再对关机的电脑空转耗电
+            // 窗口停止后返回 null，重连循环退出，不再对关机的电脑空转耗电。
+            // 注意：返回 null 只拦「失败后的自动重试」——SseClient 对每次 connect()
+            // 的首次尝试豁免门控，手动配对/手动重连永远能发出第一次连接
             nextRetryDelayMs = {
                 when {
                     connectionState == 1 -> 2000L
@@ -906,7 +908,10 @@ class SyncForegroundService : Service() {
     /**
      * 设置自动搜索开关。
      *
-     * - 开启：重置搜索时间窗并立即开始搜索；
+     * - 开启：先同步 LanDiscovery 内部总开关（此前只关不开，内部标志残留 false
+     *   会让扫描一轮即停、重试调度恒为 null —— 2.6.0 实测「关闭过再打开」必现
+     *   连接假死）。已连接时只重置时间窗并确保扫描在跑（恢复 IP 漂移感知），
+     *   绝不能走 triggerRescan 把健康连接一起切断；未连接时全量重扫找电脑；
      * - 关闭：立即中断当前搜索循环，之后仅能通过「重新扫描」手动查找。
      * 状态会持久化到 SharedPreferences，服务重启后依然生效。
      */
@@ -921,8 +926,15 @@ class SyncForegroundService : Service() {
         DebugLogger.log("SVC_ACTION", "自动搜索开关变更为: ${if (enabled) "开启" else "关闭"}")
 
         if (enabled) {
-            // 重新开启：重置时间窗并立即搜索
-            triggerRescan()
+            lanDiscovery.setAutoSearchEnabled(true)
+            if (connectionState == 1) {
+                lanDiscovery.restartAutoSearchWindow()
+                if (!lanDiscovery.isSearching) {
+                    restartDiscoveryChannels()
+                }
+            } else {
+                triggerRescan()
+            }
         } else {
             lanDiscovery.setAutoSearchEnabled(false)
         }

@@ -9,6 +9,7 @@
 ## Android 构建与保活
 
 - Release 构建必须显式配置 `signingConfig`,禁止交付未签名 `app-release-unsigned.apk`;产出后使用 `apksigner verify --verbose` 校验 V1/V2 签名;
+- 正式分发包用**个人发布密钥**签名: 密钥库 `C:\Users\wang\miyao`(PKCS#12, 别名 `key0`, CN=王海瑞, 有效期至 2051-09), 凭据经 `~/.gradle/gradle.properties` 的 `CROSSCLIP_RELEASE_STORE_FILE/STORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD` 注入(**该文件在用户目录, 严禁入库**); 未配置时 release 回退 debug 签名 —— 本机调试用可以, 不得分发。换 key = 签名身份变更 = 老设备无法覆盖安装(必须先卸载), 因此 **miyao 文件与密码必须异地备份**, 丢了就只能让用户卸载重装;
 - 移动端在网络配对成功后主动发起出站长连接(SSE/WebSocket),不依赖电脑端入站连接,规避国产系统待机时对入站 TCP 握手的节流与丢包;
 - 权限引导只引导真实依赖的核心权限(自启动),避免无关关联启动提示。
 
@@ -40,6 +41,10 @@
 ## 连接状态与断开语义
 
 - 电脑端 Peer 表的注册与摘除必须与连接同生共死:建连时 `register_peer()`,连接结束时就 `unregister_peer()`;600 秒心跳超时只是兜底,不得当作「是否已连接」的判定依据;
+- 电脑端 Peer 身份登记分两层:`/auth`、`/heartbeat` 携带真实身份,负责写入/刷新身份字段;`/events`、`/sync` 只证明在线,一律走 `touch_peer_or_register_placeholder()`(已注册仅刷新存活时间,未注册才占位登记)——禁止用占位身份无条件 `register_peer()`,否则托盘被周期性冲成「安卓手机」;
 - 手机端主动断开的顺序固定为「先落 `connectionState = 0` → 通知电脑端(`POST /disconnect`)→ 清空 `currentPcIp` → 断开 SSE → 停止 UDP/mDNS 搜索」;顺序颠倒会让 `sseClient.disconnect()` 的同步回调把扫描线程重新拉起;
+- `SseClient.connect()` 换代必须静默(`teardown(notify = false)`):被新连接顶替不等于掉线,假回调会把调用方刚置位的已连接状态冲掉;只有显式断开(手动断开/重扫/清历史)才回调 `onConnectionChanged(false)`;
+- 省电门控(`nextRetryDelayMs` 返回 null)只拦「失败后的自动重试」,每次 `connect()` 的首次尝试必须豁免 —— 手动配对/手动重连是明确的立即连接意图,闸死首轮会造成「配对成功却永未连接」的假死(§7 #28);
+- 「自动搜索」开关在服务层与 `LanDiscovery` 内部是**两个变量**,开启路径必须成对写入(只关不开会让内部标志残留 false:扫描一轮即停、重试调度恒为 null);已连接时重开开关只重置窗口并确保扫描在跑,不得走 `triggerRescan()` 切断健康连接;
 - 用户手动断开后必须置 `manualDisconnected` 抑制自动重连,该标志只在用户主动发起连接(重新扫描/输 PIN/选设备/重开自动搜索)时清除;
 - 手动断开的终态必须与「自动搜索 15 分钟超时」一致(通知栏与页面均显示「搜索已暂停」),不要为它单独造第三种状态。
