@@ -7,6 +7,11 @@ android {
     namespace = "com.crossclip.app"
     compileSdk = 34
 
+    // 个人发布签名凭据：读取 ~/.gradle/gradle.properties 的 CROSSCLIP_RELEASE_* 项
+    // （用户目录下的私有文件，不进仓库）。未配置时 release 回退 debug 签名，
+    // 保证任何机器 clone 下来都能直接出包。
+    val releaseStorePath = providers.gradleProperty("CROSSCLIP_RELEASE_STORE_FILE").orNull
+
     defaultConfig {
         applicationId = "com.crossclip.app"
         minSdk = 24
@@ -20,12 +25,26 @@ android {
             enableV1Signing = true
             enableV2Signing = true
         }
+        if (!releaseStorePath.isNullOrEmpty()) {
+            create("release") {
+                storeFile = file(releaseStorePath)
+                storePassword = providers.gradleProperty("CROSSCLIP_RELEASE_STORE_PASSWORD").get()
+                keyAlias = providers.gradleProperty("CROSSCLIP_RELEASE_KEY_ALIAS").get()
+                keyPassword = providers.gradleProperty("CROSSCLIP_RELEASE_KEY_PASSWORD").get()
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseStorePath.isNullOrEmpty()) {
+                signingConfigs.getByName("debug")
+            } else {
+                signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
